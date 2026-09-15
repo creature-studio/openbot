@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "host-agent"
+version = "0.1.0"
+dependencies = [
+ "sand-client",
+ "sand-protocol",
+]
+
+[[package]]
 name = "sand-cli"
 version = "0.1.0"
 dependencies = [

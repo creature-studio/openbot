@@ -1,0 +1,12 @@
+[package]
+name = "host-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "host-agent"
+path = "src/main.rs"
+
+[dependencies]
+sand-client = { path = "../sand-client" }
+sand-protocol = { path = "../sand-protocol" }

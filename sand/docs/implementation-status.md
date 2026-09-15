@@ -1,14 +1,16 @@
-# sandd Implementation Status - Phase0+1+2
+# sandd + host-agent Implementation Status - Phase0+1+2+3A
 
 ## Overview
-Rust Runtime Kernel `sandd` as Assistant Computer native Runtime Kernel.
-Single daemon managing multiple Runtimes, Processes, cgroups, Exec, PTY, State, Events.
+- **sandd**: Rust Runtime Kernel as Assistant Computer native Runtime Kernel. Single daemon managing multiple Runtimes, Processes, cgroups, Exec, PTY, State, Events.
+- **host-agent**: Bot Brain Runtime, Agent Session + Loop + Tool Registry + Model abstraction.
 
 Binary locations:
 - `target/debug/sandd` - daemon
 - `target/debug/sand` - CLI
+- `target/debug/host-agent` - bot brain
+- `browser-worker/src/index.js` - Node + Playwright browser worker
 
-Socket: `/run/sand/sandd.sock` (fallback `/tmp/sandd/sandd.sock`), mode 777
+Socket: `/run/sand/sandd.sock` (fallback `/tmp/sandd/sandd.sock`), mode 0660 (fixed from 777, SO_PEERCRED logging)
 State: `/run/sand/state.json` (fallback `/tmp/sandd/state.json`) - JSON lines (SQLite WAL planned)
 Cgroup root: `/sys/fs/cgroup/sand` (fallback `/tmp/sand-cgroups`)
 
@@ -44,19 +46,16 @@ Cgroup root: `/sys/fs/cgroup/sand` (fallback `/tmp/sand-cgroups`)
 - `spawn_background`: similar but detaches, thread waits for child, stores pid via cgroup, returns pid immediately
 - Both use Command with current_dir = runtime workspace
 
-### PtyManager (pty.rs) - Simplified pipe fallback
-- Original forkpty FFI had double-close bug (File::from_raw_fd double ownership). Simplified to pipe-based fallback for now:
-  - Spawns bash with piped stdin, stdout, stderr (not real PTY, but functional for tests)
-  - Stores PtySession {runtime_id, pty_id, pid, cols, rows, shell, master_fd=-1, writer Sender<Vec<u8>>, reader thread}
-  - `open_pty`: creates runtime dir, spawns bash -l, adds pid to cgroup via add_pid, spawns writer thread (receives channel -> stdin) and reader thread (stdout -> discard or log), stores session
-  - `write_pty`: sends data via channel to writer
-  - `resize_pty`: updates cols/rows in memory (no ioctl for pipe fallback, but API compatible)
-  - `signal_pty`: kill syscall via cgroup.rs kill_pid
-  - `close_pty`: kill child -9, close writer channel, remove from map
-  - `destroy_for_runtime`: close all PTYs for runtime
-  - `list_for_runtime`: returns clones
-- Future: restore forkpty with proper FFI and TIOCSWINSZ, but current pipe fallback passes all acceptance tests except true terminal emulation
-- Strategy documented: PTY continues alive after client disconnect, must be explicitly closed or runtime destroyed (verified: open via separate UDS connections, list still shows PTY after client disconnect)
+### PtyManager (pty.rs) - Real PTY fixed
+- **Fixed from pipe fallback to real PTY**: Uses `openpty` + `fork` + `setsid` + `ioctl TIOCSCTTY` + `dup2` + `execvp`
+- Handles fd ownership correctly: `dup` master fd for reader/writer threads, `File::from_raw_fd` only once per dup, original master kept for ioctl/close
+- Reader thread: reads master fd, appends to ring buffer (1MB), supports `ReadPty` RPC
+- Writer thread: mpsc channel -> master fd
+- Waiter thread: `waitpid` to get exit_code
+- Resize: `ioctl TIOCSWINSZ` + SIGWINCH
+- Verified: `tty` returns `/dev/pts/0`, ANSI prompt, interactive shell, resize 120x40 works
+- Fallback: if openpty fails, falls back to pipe (for restricted envs)
+- Strategy: PTY continues alive after client disconnect, must be explicitly closed or runtime destroyed
 
 ### StateManager (state.rs)
 - JSON lines file, not yet SQLite WAL (planned)
@@ -68,8 +67,9 @@ Cgroup root: `/sys/fs/cgroup/sand` (fallback `/tmp/sand-cgroups`)
 - VecDeque with cap 1000, push/list/list_for
 - Events: RuntimeCreated, Started, ProcessStarted/Exited, PtyOpened/Closed, BrowserStarted/Exited, Failed, Destroyed, Oom
 
-### RPC (rpc.rs) - UDS JSON lines
-- UnixListener bind to sock_path, chmod 777, per-client thread
+### RPC (rpc.rs) - UDS JSON lines, now 0660 + SO_PEERCRED
+- UnixListener bind to sock_path, chmod 0660 (fixed from 777), chgrp sand if exists, per-client thread
+- SO_PEERCRED: `getsockopt SO_PEERCRED` logs pid/uid/gid, future enforcement
 - Protocol: one JSON per line, method field dispatch
 - Methods:
   - CreateRuntime {kind, workspace} -> {ok, id, kind, workspace}
@@ -80,12 +80,13 @@ Cgroup root: `/sys/fs/cgroup/sand` (fallback `/tmp/sand-cgroups`)
   - SpawnBackground {id, command: array} -> {ok, pid}
   - OpenPty {id, pty_id, cols, rows, shell} -> {ok, runtime_id, pty_id, pid}
   - WritePty {id, pty_id, data_b64} -> {ok}
+  - ReadPty {id, pty_id, clear} -> {ok, data_b64, len} (NEW, supports real PTY output polling)
   - ResizePty {id, pty_id, cols, rows} -> {ok}
   - ClosePty {id, pty_id} -> {ok}
   - ListPtys {id} -> {ok, ptys: [{pty_id, pid, cols, rows}]}
   - Status -> {ok, runtime_count, version}
-- Base64: custom encode/decode without external crate, fixed padding bug (previously produced extra \0 bytes on decode)
-- Command parsing: handles both string and array forms, splits whitespace if needed
+- Base64: custom encode/decode without external crate, fixed padding bug
+- Command parsing: handles both string and array forms
 
 ### Client (sand-client)
 - UDS client, connects to /run/sand/sandd.sock or /tmp/sandd/sandd.sock
@@ -161,16 +162,46 @@ Cgroup root: `/sys/fs/cgroup/sand` (fallback `/tmp/sand-cgroups`)
 
 ## Known Limitations / TODO for next phases
 
-- State is JSON lines, not SQLite WAL (planned for Phase1 complete)
-- PTY is pipe fallback, not real forkpty with TIOCSWINSZ ioctl (needs restore of proper PTY FFI)
+- State is JSON lines, not SQLite WAL (planned, needed for Session/Task/Events recovery)
+- PTY now real forkpty ✅, but still needs more edge tests: vim/top/codex/claude/python REPL
 - No pidfd yet (uses /proc/<pid> exists check, PID reuse risk)
-- No protobuf/tonic yet (uses JSON lines over UDS)
-- No HTTP 1337/1338 compatibility layer yet (Phase3)
-- No Desktop/Computer/Browser managers yet (Phase5/6)
+- No protobuf/tonic yet (uses JSON lines over UDS, base64 for binary - should be binary framed)
+- No HTTP 1337/1338 compatibility layer yet (Phase3 compatibility)
+- Desktop/Computer/Browser: BrowserWorker Node+Playwright implemented as HTTP server, host-agent tools call it via curl, but not yet managed by sandd cgroup auto-spawn
 - No Supervisor DesiredState/ObservedState reconcile yet (Phase7)
-- No Capability/SO_PEERCRED yet
+- Capability: permission map exists, SO_PEERCRED logging added, but not enforced yet (0660 fixed)
 - No structured tracing metrics yet (uses eprintln)
-- No SQLite WAL, no event streaming via broadcast (VecDeque only)
+- No event streaming via broadcast (VecDeque only)
+
+## New: host-agent Phase 3A Implemented
+
+### AgentSession, Status, Attention, Task
+- AgentSession id/runtime_id/model/messages/tool_state/cwd/status/goal
+- AgentStatus Idle/Running/WaitingTool/WaitingInput/ReadyForCheck/Failed/Completed
+- Attention WaitingInput/ReadyForCheck/ExecutionError/PermissionRequired/Completed
+- Task id/goal/session_id/runtime_id/status/artifacts/result, TaskManager
+
+### Tool Protocol Separation
+- Agent Tool API: shell.exec, file.read/write/list/search/stat/patch, terminal.open/write/read, browser.open/snapshot/click/fill/press/tabs/screenshot, computer.screenshot/click/type
+- sandd Runtime API: CreateRuntime/Exec/OpenPty etc.
+- host-agent converts high-level to low-level
+
+### Model Abstraction
+- MockModel for testing, OpenAICompatibleModel via curl (OPENAI_API_KEY)
+
+### Loop
+- user message -> LLM -> tool_calls -> exec -> tool_results -> LLM -> final
+- Event callback for observability
+
+### Browser Worker
+- Node + Playwright, HTTP server with /open, /snapshot (returns [ref] role "name"), /click, /fill, /press, /screenshot, /tabs
+- Snapshot design key for Bot efficiency: semantic refs, not raw selectors
+
+### Verification
+- `host-agent run "explore project"` works with mock model: file.list, file.read, shell.exec, final answer
+- Real PTY verified: tty -> /dev/pts/0
+- UDS 0660 + SO_PEERCRED logging
+- All previous sandd tests still pass
 
 ## Build
 

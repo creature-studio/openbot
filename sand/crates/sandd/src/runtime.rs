@@ -11,7 +11,6 @@ use crate::events::EventBus;
 use crate::process::ProcessManager;
 use crate::pty::PtyManager;
 
-#[derive(Debug)]
 pub struct RuntimeManager {
     runtimes: Arc<Mutex<HashMap<String, Runtime>>>,
     processes: Arc<Mutex<HashMap<String, Vec<i32>>>>, // runtime_id -> pids

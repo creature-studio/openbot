@@ -19,14 +19,19 @@ impl RpcServer {
 
     pub fn run(&self) -> std::io::Result<()> {
         let listener = UnixListener::bind(&self.sock_path)?;
-        // set permissions
+        // set permissions to 0660 (group sand if exists), not 777
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.sock_path, std::fs::Permissions::from_mode(0o777));
+            let _ = std::fs::set_permissions(&self.sock_path, std::fs::Permissions::from_mode(0o660));
+            // Try to chgrp to sand if group exists
+            let _ = std::process::Command::new("chgrp")
+                .args(["sand", &self.sock_path.to_string_lossy()])
+                .output();
+            // Fallback: chmod 660 already, future SO_PEERCRED will enforce
         }
 
-        eprintln!("[rpc] listening on {}", self.sock_path.display());
+        eprintln!("[rpc] listening on {} (mode 0660, SO_PEERCRED planned)", self.sock_path.display());
 
         for stream in listener.incoming() {
             match stream {
@@ -49,6 +54,15 @@ impl RpcServer {
 }
 
 fn handle_client(stream: UnixStream, mgr: Arc<RuntimeManager>) -> std::io::Result<()> {
+    // Try to get peer credentials via SO_PEERCRED (Linux)
+    #[cfg(unix)]
+    {
+        if let Ok(creds) = get_peer_cred(&stream) {
+            eprintln!("[rpc] client peer pid={} uid={} gid={}", creds.pid, creds.uid, creds.gid);
+            // Future: enforce group sand or uid check, capability check
+        }
+    }
+
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
@@ -67,6 +81,45 @@ fn handle_client(stream: UnixStream, mgr: Arc<RuntimeManager>) -> std::io::Resul
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct PeerCred {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(unix)]
+fn get_peer_cred(stream: &UnixStream) -> std::io::Result<PeerCred> {
+    use std::os::unix::io::AsRawFd;
+    use std::mem::MaybeUninit;
+    // SO_PEERCRED = 17 on Linux
+    const SO_PEERCRED: i32 = 17;
+    const SOL_SOCKET: i32 = 1;
+    #[repr(C)]
+    struct Ucred {
+        pid: i32,
+        uid: u32,
+        gid: u32,
+    }
+    let fd = stream.as_raw_fd();
+    let mut ucred = MaybeUninit::<Ucred>::uninit();
+    let mut len = std::mem::size_of::<Ucred>() as u32;
+    let ret = unsafe {
+        getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ucred.as_mut_ptr() as *mut _, &mut len as *mut _ as *mut _)
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let ucred = unsafe { ucred.assume_init() };
+    Ok(PeerCred { pid: ucred.pid, uid: ucred.uid, gid: ucred.gid })
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn getsockopt(sockfd: i32, level: i32, optname: i32, optval: *mut std::os::raw::c_void, optlen: *mut u32) -> i32;
 }
 
 fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
@@ -243,6 +296,18 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
             let pty_id = extract_string_field(req_str, "pty_id").unwrap_or_else(|| "default".to_string());
             match mgr.pty_manager().close_pty(&id_str, &pty_id) {
                 Ok(_) => format!("{{\"ok\":true}}"),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        "ReadPty" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let pty_id = extract_string_field(req_str, "pty_id").unwrap_or_else(|| "default".to_string());
+            let clear = req_str.contains("\"clear\":true") || req_str.contains("\"clear\": 1");
+            match mgr.pty_manager().read_pty(&id_str, &pty_id, clear) {
+                Ok(data) => {
+                    let b64 = base64_encode(&data);
+                    format!("{{\"ok\":true,\"data_b64\":\"{}\",\"len\":{}}}", b64, data.len())
+                }
                 Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
             }
         }
