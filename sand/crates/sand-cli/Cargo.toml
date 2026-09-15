@@ -1,0 +1,12 @@
+[package]
+name = "sand-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sand"
+path = "src/main.rs"
+
+[dependencies]
+sand-protocol = { path = "../sand-protocol" }
+sand-client = { path = "../sand-client" }

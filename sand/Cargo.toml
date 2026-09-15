@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/sand-protocol",
+    "crates/sand-client",
+    "crates/sandd",
+    "crates/sand-cli",
+    "crates/sand-init",
+    "crates/host-agent",
+]
+resolver = "2"
