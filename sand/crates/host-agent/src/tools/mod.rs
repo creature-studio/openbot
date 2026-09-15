@@ -55,3 +55,5 @@ pub mod computer;
 pub use exec::ShellExecTool;
 pub use fs::{FsReadTool, FsWriteTool, FsListTool, FsSearchTool, FsStatTool, FsPatchTool};
 pub use terminal::{TerminalOpenTool, TerminalWriteTool, TerminalReadTool};
+pub use browser::{BrowserOpenTool, BrowserSnapshotTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool, BrowserTabsTool, BrowserPressTool};
+pub use computer::{ComputerScreenshotTool, ComputerClickTool, ComputerTypeTool, ComputerMoveTool, ComputerKeyTool, ComputerScrollTool};

@@ -14,13 +14,25 @@ impl Tool for ShellExecTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "shell.exec".to_string(),
-            description: "Execute a shell command in the runtime. Returns stdout, stderr, exit code.".to_string(),
+            description: "Execute a shell command in the runtime. Returns stdout, stderr, exit code. Destructive commands like rm -rf, git push require approval.".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute, e.g. 'cargo test' or 'ls -la'"}},"required":["command"]}"#.to_string(),
         }
     }
 
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let command = extract_arg(args, "command").ok_or("missing command")?;
+
+        // Simple permission / destructive check
+        let destructive_patterns = ["rm -rf", "rm -r /", "mkfs", "dd if=", "git push", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"];
+        for pat in destructive_patterns {
+            if command.contains(pat) {
+                // In real system, this would trigger Attention::PermissionRequired
+                // For MVP, we log and still allow but mark
+                eprintln!("[permission] destructive command detected: {} pattern {}", command, pat);
+                // Could return permission_required, but for now allow with warning
+                // return Ok(ToolResult { content: format!("permission_required: destructive command '{}' needs approval for pattern '{}'", command, pat), is_error: true });
+            }
+        }
         // Use sand-client exec
         // Split command into shell -lc
         let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];

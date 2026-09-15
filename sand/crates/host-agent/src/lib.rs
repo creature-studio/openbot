@@ -4,6 +4,7 @@ pub mod tools;
 pub mod runtime;
 pub mod events;
 pub mod api;
+pub mod persistence;
 
 pub use agent::{AgentSession, AgentSessionId, AgentStatus, Attention, AgentContext, AgentLoop, Task, TaskManager};
 pub use model::{Model, ModelResponse, MockModel, OpenAICompatibleModel};
@@ -11,6 +12,7 @@ pub use tools::{ToolRegistry, Tool, ToolDefinition, ToolResult};
 pub use runtime::RuntimeManager;
 pub use events::{EventBus, AgentEvent};
 pub use api::HostAgentApi;
+pub use persistence::SqlitePersistence;
 
 pub fn default_tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -34,5 +36,8 @@ pub fn default_tool_registry() -> ToolRegistry {
     registry.register(tools::computer::ComputerScreenshotTool);
     registry.register(tools::computer::ComputerClickTool);
     registry.register(tools::computer::ComputerTypeTool);
+    registry.register(tools::computer::ComputerMoveTool);
+    registry.register(tools::computer::ComputerKeyTool);
+    registry.register(tools::computer::ComputerScrollTool);
     registry
 }

@@ -1,6 +1,22 @@
-use host_agent::{AgentSession, AgentLoop, Model, MockModel, default_tool_registry, HostAgentApi, AgentStatus};
+use host_agent::{AgentSession, AgentLoop, Model, MockModel, default_tool_registry, HostAgentApi, AgentStatus, SqlitePersistence};
 use host_agent::agent::session::{Message, Role, ToolCall};
 use host_agent::model::ModelResponse;
+use std::path::PathBuf;
+
+fn get_persistence() -> Option<SqlitePersistence> {
+    let path = if std::path::Path::new("/run/sand").exists() {
+        PathBuf::from("/run/sand/state.db")
+    } else {
+        PathBuf::from("/tmp/sandd/state.db")
+    };
+    match SqlitePersistence::new(path) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("[host-agent] persistence init failed: {}, continuing without", e);
+            None
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -11,9 +27,13 @@ fn main() {
 
     match args[1].as_str() {
         "run" => {
-            // Minimal bot run: user message -> loop
             let goal = if args.len() > 2 { args[2..].join(" ") } else { "help me explore this project".to_string() };
             println!("[host-agent] goal: {}", goal);
+
+            let persistence = get_persistence();
+            if persistence.is_some() {
+                println!("[host-agent] persistence enabled at /run/sand/state.db");
+            }
 
             let api = HostAgentApi::new();
             let mut session = match api.create_session("gpt-4o-mini".to_string()) {
@@ -25,7 +45,12 @@ fn main() {
             };
             println!("[host-agent] created session {} runtime {}", session.id.0, session.runtime_id);
 
-            session.add_system_message("You are a helpful assistant with tools: shell.exec, file.read, file.list, file.search, etc. Explore the project and answer.".to_string());
+            // Save session initially
+            if let Some(p) = &persistence {
+                let _ = p.save_session(&session.id.0, &session.runtime_id, &session.model, session.status.as_str(), session.goal.as_deref(), &session.cwd, session.created_at, session.updated_at, "[]");
+            }
+
+            session.add_system_message("You are a helpful assistant with tools: shell.exec, file.read, file.list, file.search, file.patch, terminal.open/write/read, browser.open/snapshot/click/fill, computer.*. Explore the project and answer. Prefer file.patch over shell for code changes.".to_string());
             session.add_user_message(goal.clone());
 
             // Try OpenAI model if env set, else mock
