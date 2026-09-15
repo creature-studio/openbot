@@ -36,4 +36,24 @@ jobs:
 
       - name: cargo check
         working-directory: client
-        run: cargo check --workspace
+        run: |
+          set +e
+          cargo check --workspace --message-format=short > /tmp/check.log 2>&1
+          code=$?
+          tail -5 /tmp/check.log
+          if [ "$code" -ne 0 ]; then
+            echo "CHECK_FAILED=true" >> "$GITHUB_ENV"
+          fi
+          exit "$code"
+
+      # The sandbox running this agent cannot download Actions logs, so mirror
+      # the failure output into check annotations (readable via the API).
+      - name: Surface errors as annotations
+        if: failure()
+        run: |
+          grep -E "^error|: error: " /tmp/check.log | head -10 | while IFS= read -r line; do
+            line=$(printf '%s' "$line" | head -c 1500 | sed 's/%/%25/g')
+            echo "::error::$line"
+          done
+          echo "--- last 5 lines of check.log ---"
+          tail -5 /tmp/check.log
