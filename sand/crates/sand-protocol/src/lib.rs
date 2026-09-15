@@ -333,22 +333,21 @@ impl Runtime {
     }
 }
 
-// Simple JSON-like serialization without serde for persistence
+// JSON serialization for persistence.
 impl Runtime {
     pub fn to_json_line(&self) -> String {
-        format!(
-            "{{\\"id\\":\\"{}\\",\\"kind\\":\\"{}\\",\\"state\\":\\"{}\\",\\"workspace\\":\\"{}\\",\\"cgroup\\":\\"{}\\",\\"created\\":{},\\"started\\":{},\\"caps\\":[{}],\\"procs\\":{},\\"ptys\\":{},\\"machine_id\\":\\"{}\\"}}",
-            self.id.0,
-            self.kind.as_str(),
-            self.state.as_str().replace('\\"', "'"),
-            self.workspace.display(),
-            self.cgroup_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
-            self.created_at_ms,
-            self.started_at_ms.unwrap_or(0),
-            self.capabilities.iter().map(|c| format!("\\\"{}\\\"", c)).collect::<Vec<_>>().join(","),
-            self.process_count,
-            self.pty_count,
-            self.machine_id.0
-        )
+        serde_json::json!({
+            "id": self.id.0,
+            "kind": self.kind.as_str(),
+            "state": self.state.as_str(),
+            "workspace": self.workspace.display().to_string(),
+            "cgroup": self.cgroup_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            "created": self.created_at_ms,
+            "started": self.started_at_ms.unwrap_or(0),
+            "caps": self.capabilities,
+            "procs": self.process_count,
+            "ptys": self.pty_count,
+            "machine_id": self.machine_id.0,
+        }).to_string()
     }
 }

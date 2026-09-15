@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
-use futures::stream::BoxStream;
+use crate::runtime_transport::BoxStream;
 
 use sand_client::SandClient;
 use sand_protocol::SAND_PROTOCOL_VERSION;

@@ -18,7 +18,7 @@ pub use workbench::Workbench;
 pub use timeline::{
     TimelineItem, UserMessage, AssistantMessage, StatusItem, ToolItem,
     ToolPresentation, PermissionItem, ArtifactItem, ErrorItem,
-    ReadyForCheckItem, ToolStatus as ToolItemStatus,
+    ReadyForCheckItem, ToolItemStatus,
 };
 pub use attention::Attention;
 pub use connection::{ConnectionStatus, ServerInfo};

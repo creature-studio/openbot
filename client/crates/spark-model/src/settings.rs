@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::Machine;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {

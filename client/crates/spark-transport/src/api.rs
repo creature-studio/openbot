@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use spark_model::*;
+use spark_model::task::FileChange;
 
 // ---------------------------------------------------------------------------
 // ApiClient
@@ -61,6 +62,7 @@ impl ApiClient {
             id: TaskId::new(),
             goal: goal.to_string(),
             status: TaskStatus::Pending,
+            machine_id: spark_model::MachineId::local(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         })

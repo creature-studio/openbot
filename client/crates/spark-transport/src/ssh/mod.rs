@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use futures::stream::BoxStream;
+use crate::runtime_transport::BoxStream;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
@@ -660,7 +660,7 @@ impl SshTransport {
                 }
                 bootstrap::bootstrap(self)
                     .await
-                    .map_err(ConnectError::Bootstrap)?;
+                    .map_err(|err| ConnectError::Bootstrap(err.to_string()))?;
                 self.start_bridge().await
             }
         }

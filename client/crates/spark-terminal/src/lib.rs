@@ -23,6 +23,7 @@
 //! is handled by alacritty_terminal.
 
 use alacritty_terminal::event::EventListener;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::Term;
 use parking_lot::Mutex;
@@ -75,19 +76,17 @@ impl TerminalModel {
 
     /// Feed raw bytes from the PTY into the VT parser.
     pub fn feed(&self, data: &[u8]) {
-        use alacritty_terminal::ansi;
+        use alacritty_terminal::vte::ansi;
         let mut term = self.term.lock();
-        let mut parser = ansi::Processor::new();
-        for byte in data {
-            parser.advance(&mut *term, *byte);
-        }
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut *term, data);
     }
 
     /// Resize the terminal.
     pub fn resize(&self, cols: u16, rows: u16) {
         let size = TermSize::new(cols as usize, rows as usize);
         let mut term = self.term.lock();
-        term.resize(&size);
+        term.resize(size);
     }
 
     /// Read the current grid content as plain text (for simple display).
@@ -95,10 +94,12 @@ impl TerminalModel {
     /// styled rendering.
     pub fn content_plain(&self) -> String {
         let term = self.term.lock();
-        let grid = term.grid();
         let mut lines = Vec::new();
-        for row in grid.display_iter() {
-            let line: String = row.map(|c| c.c).collect();
+        for row in 0..term.screen_lines() {
+            let mut line = String::new();
+            for col in 0..term.columns() {
+                line.push(term.grid()[alacritty_terminal::index::Line(row as i32)][alacritty_terminal::index::Column(col)].c);
+            }
             lines.push(line);
         }
         lines.join("\n")

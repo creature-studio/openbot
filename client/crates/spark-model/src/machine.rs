@@ -20,7 +20,6 @@
 //! the runtime kernel.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Opaque machine identifier.
 ///
@@ -426,7 +425,7 @@ impl Machine {
     pub fn connection_target(&self) -> String {
         match &self.kind {
             MachineKind::Local => "local".to_string(),
-            MachineKind::Ssh { host, port, user, ssh_config_host } => {
+            MachineKind::Ssh { host, port: _, user, ssh_config_host } => {
                 if let Some(alias) = ssh_config_host {
                     alias.clone()
                 } else if let Some(user) = user {
@@ -578,7 +577,12 @@ impl MachineConnection {
 
     pub fn ssh(name: String, host: String, port: u16, user: Option<String>, ssh_config_host: Option<String>) -> Self {
         Self {
-            kind: MachineKind::Ssh { host, port, user, ssh_config_host },
+            kind: MachineKind::Ssh {
+                host: host.clone(),
+                port,
+                user: user.clone(),
+                ssh_config_host: ssh_config_host.clone(),
+            },
             name,
             host,
             port,
