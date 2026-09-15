@@ -1,627 +1,1019 @@
-//! MachineManager: manages local and remote (SSH) machines.
+//! MachineManager — everything Spark knows about machines.
 //!
-//! This is the central coordinator for machine lifecycle:
-//! - Add/remove machines
-//! - Connect/disconnect (SSH bridge for remote, UDS for local)
-//! - Bootstrap remote machines (detect platform, install sandd, start sandd)
-//! - Route Runtime operations to the correct transport
-//! - Periodic health pings
+//! ```text
+//! tool call (shell.exec / file.* / terminal.* / browser.* / computer.*)
+//!   │  runtime_id
+//!   ▼
+//! Session → Runtime{ machine_id }                  (fixed at creation, v1)
+//!   │  machine_id
+//!   ▼
+//! MachineManager.transport(machine_id)             ← the only routing decision
+//!   │
+//!   ▼
+//! Arc<dyn RuntimeTransport>                        LocalTransport | SshTransport
+//! ```
 //!
-//! The key invariant: tools NEVER know whether a machine is local or remote.
-//! They call through the RuntimeTransport trait, and MachineManager dispatches.
+//! Responsibilities (architecture §二十三):
+//!
+//! * keep the machine registry (add / remove / persist);
+//! * own each machine's transport and its lifecycle (connect, disconnect,
+//!   reconnect with backoff, bootstrap);
+//! * convert transport failures into `MachineStatus` + `Attention`, never into a
+//!   failed task;
+//! * route by `machine_id` — nothing above this module branches on local/remote.
+//!
+//! Locking rule: the registry is a `std::sync::RwLock` and **no lock is held
+//! across an `.await`**. Health checks and reconnects clone the `Arc` handles
+//! they need and release the lock immediately, so a slow SSH machine can never
+//! block the UI or a tool call on another machine.
 
-use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use futures::stream::{self, StreamExt};
-use tokio::sync::Mutex;
-use tokio::time::interval;
+use anyhow::{anyhow, bail, Context, Result};
+use tokio::sync::Mutex as AsyncMutex;
 
-use sand_protocol::{MachineId, RuntimeId};
-use spark_model::{Machine, MachineStatus, MachineCapabilities, MachineMetadata};
-use spark_transport::runtime_transport::{
-    RuntimeTransport, LocalTransport, SshTransport,
-    CreateRuntimeRequest, SandStatus, RuntimeInfo,
-    RuntimeEvent, BridgeConfig, BridgeHandshake,
+use spark_model::{Machine, MachineId, MachineKind, MachineStatus, SparkPaths};
+use spark_transport::{
+    ConnectError, MachineDraft, ReconnectConfig, ReconnectOutcome, RuntimeTransport, SshTransport,
+    LocalTransport,
 };
 
-// ---------------------------------------------------------------------------
-// MachineHandle — per-machine state
-// ---------------------------------------------------------------------------
+use crate::persistence::SqlitePersistence;
 
+/// How often a connected machine is pinged.
+const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+/// Latency thresholds that define "slow" and "degraded" (§二十七).
+const LATENCY_OK_MS: u64 = 100;
+const LATENCY_DEGRADED_MS: u64 = 500;
+
+/// What the UI needs to know about a machine right now.
+#[derive(Debug, Clone, Default)]
+pub struct MachineHealth {
+    pub latency_ms: Option<u64>,
+    pub checked_at: Option<Instant>,
+    pub last_error: Option<String>,
+    /// Consecutive failed health checks (drives the reconnect decision).
+    pub failures: u32,
+    /// Reconnect attempt counter (0 when healthy).
+    pub attempts: u32,
+}
+
+/// Map a measured latency to a status (§二十七: <100 Connected, 100–500 slow,
+/// >500 Degraded, ssh broken Disconnected).
+pub fn status_for_latency(latency_ms: Option<u64>) -> MachineStatus {
+    match latency_ms {
+        Some(ms) if ms < LATENCY_OK_MS => MachineStatus::Connected,
+        Some(ms) if ms <= LATENCY_DEGRADED_MS => MachineStatus::Degraded,
+        Some(_) => MachineStatus::Degraded,
+        None => MachineStatus::Disconnected,
+    }
+}
+
+/// Per-machine state: the record, its transport and its health.
 struct MachineHandle {
-    /// The Machine record.
     machine: Machine,
-    /// The active transport (LocalTransport or SshTransport).
-    transport: Option<Arc<dyn RuntimeTransport>>,
-    /// Whether we're currently trying to reconnect.
-    reconnect_attempt: Arc<Mutex<u32>>,
-    /// Last status update time.
-    last_status_at: Arc<Mutex<Option<Instant>>>,
+    transport: Arc<dyn RuntimeTransport>,
+    /// Present for SSH machines: bootstrap and host-key trust need the SSH
+    /// specific API, which deliberately is not on `RuntimeTransport`.
+    ssh: Option<Arc<SshTransport>>,
+    health: Arc<AsyncMutex<MachineHealth>>,
+    /// Set while a connect/reconnect attempt is in flight, so two callers do
+    /// not start two ssh processes for the same machine.
+    connecting: Arc<AsyncMutex<()>>,
 }
 
 impl MachineHandle {
     fn new(machine: Machine) -> Self {
-        let transport = match &machine.kind {
-            spark_model::MachineKind::Local => {
-                Some(Arc::new(LocalTransport::new(Some(MachineId::local()))))
-            }
-            spark_model::MachineKind::Ssh { .. } => {
-                let ssh = SshTransport::new(&machine);
-                Some(Arc::new(ssh))
-            }
-        };
-
+        let (transport, ssh): (Arc<dyn RuntimeTransport>, Option<Arc<SshTransport>>) =
+            match &machine.kind {
+                MachineKind::Local => (Arc::new(LocalTransport::new()), None),
+                MachineKind::Ssh { .. } => {
+                    let ssh = Arc::new(SshTransport::new(&machine));
+                    (ssh.clone(), Some(ssh))
+                }
+            };
         Self {
             machine,
             transport,
-            reconnect_attempt: Arc::new(Mutex::new(0)),
-            last_status_at: Arc::new(Mutex::new(None)),
+            ssh,
+            health: Arc::new(AsyncMutex::new(MachineHealth::default())),
+            connecting: Arc::new(AsyncMutex::new(())),
         }
     }
 
-    fn machine_id(&self) -> MachineId {
+    fn ssh(&self) -> Option<Arc<SshTransport>> {
+        self.ssh.clone()
+    }
+
+    fn id(&self) -> MachineId {
         self.machine.id.clone()
     }
 }
 
-// ---------------------------------------------------------------------------
-// MachineManager
-// ---------------------------------------------------------------------------
+/// Cheap clone of a handle, used when the registry lock must be released
+/// before awaiting.
+struct HandleSnapshot {
+    machine: Machine,
+    transport: Arc<dyn RuntimeTransport>,
+    ssh: Option<Arc<SshTransport>>,
+    health: Arc<AsyncMutex<MachineHealth>>,
+    #[allow(dead_code)]
+    connecting: Arc<AsyncMutex<()>>,
+}
+
+impl HandleSnapshot {
+    fn id(&self) -> MachineId {
+        self.machine.id.clone()
+    }
+}
+
+/// Events the manager publishes for the UI / host-agent event bus.
+#[derive(Debug, Clone)]
+pub enum MachineEvent {
+    Added(Machine),
+    Removed(MachineId),
+    StatusChanged {
+        machine_id: MachineId,
+        status: MachineStatus,
+        detail: Option<String>,
+    },
+    /// The user must confirm a host key fingerprint.
+    AttentionRequired {
+        machine_id: MachineId,
+        issue: Box<spark_transport::HostKeyIssue>,
+    },
+    MetadataUpdated(Machine),
+}
 
 pub struct MachineManager {
-    /// All registered machines.
-    machines: HashMap<MachineId, MachineHandle>,
-    /// All active transport event streams.
-    event_streams: Mutex<Vec<(MachineId, tokio_stream::StreamExt<RuntimeEvent>)>>,
-    /// Shutdown signal.
-    shutdown: Mutex<bool>,
+    machines: RwLock<HashMap<MachineId, MachineHandle>>,
+    /// Persisted machine records (host alias/name/port/user only — never keys).
+    persistence: Option<Arc<SqlitePersistence>>,
+    reconnect: ReconnectConfig,
+    /// Subscribers (UI, event bus).
+    listeners: RwLock<Vec<Arc<dyn Fn(MachineEvent) + Send + Sync>>>,
+    running: RwLock<bool>,
+    /// Host key issues waiting for the user, per machine. Only a confirmation
+    /// through [`MachineManager::trust_host_key`] consumes one, so a fingerprint
+    /// can never be trusted as a side effect of some other call.
+    pending_host_keys: RwLock<HashMap<MachineId, spark_transport::HostKeyIssue>>,
 }
 
 impl MachineManager {
+    /// Registry with only the local machine, no persistence.
     pub fn new() -> Self {
-        // Start with the local machine
-        let local = Machine::local(Some("Local".to_string()));
-        let mut machines = HashMap::new();
-        machines.insert(local.id.clone(), MachineHandle::new(local));
-
-        Self {
-            machines,
-            event_streams: Mutex::new(vec![]),
-            shutdown: Mutex::new(false),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Machine registration
-    // -----------------------------------------------------------------------
-
-    /// Add a new machine (local or SSH).
-    pub async fn add_machine(&self, machine: Machine) -> Result<()> {
-        let id = machine.id.clone();
-
-        if self.machines.contains_key(&id) {
-            bail!("machine already exists: {}", id);
-        }
-
-        let handle = MachineHandle::new(machine);
-        self.machines.insert(id.clone(), handle);
-
-        // Auto-connect if local, or if SSH with ssh_config_host
-        let handle = self.machines.get(&id).unwrap();
-        if handle.machine.kind.is_local() {
-            // Local is always "connected" — it uses UDS directly.
-            let _ = self.update_machine_status(&id, MachineStatus::Connected).await;
-        } else {
-            // Try to connect
-            let _ = self.connect_machine(&id).await;
-        }
-
-        tracing::info!(machine_id = %id, "machine added");
-        Ok(())
-    }
-
-    /// Remove a machine and disconnect if connected.
-    pub async fn remove_machine(&self, machine_id: &MachineId) -> Result<()> {
-        if let Some(handle) = self.machines.get(machine_id) {
-            // Disconnect if connected
-            if let Some(transport) = handle.transport.as_ref() {
-                if transport.is_connected() {
-                    // For SSH, disconnect the bridge
-                    if let Some(ssh) = transport.downcast_ref::<SshTransport>() {
-                        let _ = ssh.disconnect().await;
-                    }
-                }
-            }
-        }
-
-        self.machines.remove(machine_id);
-        tracing::info!(machine_id = %machine_id, "machine removed");
-        Ok(())
-    }
-
-    /// Get a machine by ID.
-    pub fn get_machine(&self, machine_id: &MachineId) -> Option<&Machine> {
-        self.machines.get(machine_id).map(|h| &h.machine)
-    }
-
-    /// Get all machines.
-    pub fn list_machines(&self) -> Vec<Machine> {
-        self.machines.values().map(|h| h.machine.clone()).collect()
-    }
-
-    // -----------------------------------------------------------------------
-    // Connection management
-    // -----------------------------------------------------------------------
-
-    /// Connect to a machine (establish SSH bridge for remote, verify UDS for local).
-    pub async fn connect_machine(&self, machine_id: &MachineId) -> Result<()> {
-        let handle = self.machines.get(machine_id)
-            .ok_or_else(|| anyhow!("machine not found: {}", machine_id))?;
-
-        // Update status to connecting
-        self.update_machine_status(machine_id, MachineStatus::Connecting).await;
-
-        match &handle.machine.kind {
-            spark_model::MachineKind::Local => {
-                // Local is always available — just check UDS
-                let transport = handle.transport.as_ref().unwrap();
-                let status = transport.status().await?;
-                if status.connected {
-                    self.update_machine_status(machine_id, MachineStatus::Connected).await;
-                } else {
-                    self.update_machine_status(machine_id, MachineStatus::Error).await;
-                    bail!("local sandd not reachable");
-                }
-            }
-            spark_model::MachineKind::Ssh { .. } => {
-                // For SSH, the transport is SshTransport
-                let transport = handle.transport.as_ref().unwrap();
-
-                // Try to connect via SSH
-                match transport.connect().await {
-                    Ok(()) => {
-                        // After SSH connect, perform handshake via bridge
-                        match self.perform_handshake(machine_id).await {
-                            Ok(handshake) => {
-                                // Update machine metadata from handshake
-                                self.update_machine_from_handshake(machine_id, &handshake).await;
-                                self.update_machine_status(machine_id, MachineStatus::Connected).await;
-                                tracing::info!(machine_id = %machine_id, "machine connected via SSH");
-                            }
-                            Err(e) => {
-                                tracing::warn!(machine_id = %machine_id, error = %e, "SSH connected but handshake failed");
-                                self.update_machine_status(machine_id, MachineStatus::Bootstrapping).await;
-                                // Try to bootstrap
-                                let _ = self.bootstrap_machine(machine_id).await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(machine_id = %machine_id, error = %e, "SSH connection failed");
-                        self.update_machine_status(machine_id, MachineStatus::Unreachable).await;
-                        bail!("SSH connection failed: {}", e);
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Disconnect from a machine.
-    pub async fn disconnect_machine(&self, machine_id: &MachineId) -> Result<()> {
-        let handle = self.machines.get(machine_id)
-            .ok_or_else(|| anyhow!("machine not found: {}", machine_id))?;
-
-        if let Some(transport) = handle.transport.as_ref() {
-            if let Some(ssh) = transport.downcast_ref::<SshTransport>() {
-                let _ = ssh.disconnect().await;
-            }
-        }
-
-        self.update_machine_status(machine_id, MachineStatus::Disconnected).await;
-        Ok(())
-    }
-
-    /// Reconnect to a machine (with backoff).
-    pub async fn reconnect_machine(&self, machine_id: &MachineId) -> Result<()> {
-        let mut attempt = self.machines.get(machine_id)
-            .ok_or_else(|| anyhow!("machine not found"))?
-            .reconnect_attempt.lock().unwrap();
-        *attempt += 1;
-
-        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s, 30s...
-        let delay = match *attempt {
-            1 => Duration::from_secs(1),
-            2 => Duration::from_secs(2),
-            3 => Duration::from_secs(4),
-            4 => Duration::from_secs(8),
-            5 => Duration::from_secs(16),
-            _ => Duration::from_secs(30),
+        let manager = Self {
+            machines: RwLock::new(HashMap::new()),
+            persistence: None,
+            reconnect: ReconnectConfig::default(),
+            listeners: RwLock::new(Vec::new()),
+            running: RwLock::new(false),
+            pending_host_keys: RwLock::new(HashMap::new()),
         };
+        manager.register(Machine::local(Some("Local".to_string())));
+        manager
+    }
 
-        tracing::info!(machine_id = %machine_id, attempt = *attempt, "reconnecting in {:?}", delay);
-        tokio::time::sleep(delay).await;
+    /// Registry that restores the machines saved in SQLite.
+    pub fn with_persistence(persistence: Arc<SqlitePersistence>) -> Self {
+        let manager = Self {
+            machines: RwLock::new(HashMap::new()),
+            persistence: Some(persistence),
+            reconnect: ReconnectConfig::default(),
+            listeners: RwLock::new(Vec::new()),
+            running: RwLock::new(false),
+            pending_host_keys: RwLock::new(HashMap::new()),
+        };
+        manager.register(Machine::local(Some("Local".to_string())));
 
-        // Check if we should abort — not for auth errors
-        let handle = self.machines.get(machine_id).unwrap();
-        let status = handle.machine.status.clone();
-        if matches!(status, MachineStatus::Error) {
-            // Auth errors need user action — don't reconnect automatically
-            bail!("machine in Error state, manual intervention required");
+        match manager.persistence.as_ref().map(|p| p.load_machines()) {
+            Some(Ok(machines)) => {
+                for machine in machines {
+                    manager.register(machine);
+                }
+            }
+            Some(Err(e)) => tracing::warn!("cannot load machines from sqlite: {e}"),
+            None => {}
+        }
+        manager
+    }
+
+    // -----------------------------------------------------------------------
+    // Registration
+    // -----------------------------------------------------------------------
+
+    fn register(&self, machine: Machine) {
+        let handle = MachineHandle::new(machine.clone());
+        if let Ok(mut machines) = self.machines.write() {
+            machines.insert(machine.id.clone(), handle);
+        }
+        self.emit(MachineEvent::Added(machine));
+    }
+
+    /// Subscribe to machine events (UI stores, logging).
+    pub fn subscribe(&self, listener: Arc<dyn Fn(MachineEvent) + Send + Sync>) {
+        if let Ok(mut listeners) = self.listeners.write() {
+            listeners.push(listener);
+        }
+    }
+
+    fn emit(&self, event: MachineEvent) {
+        if let Ok(listeners) = self.listeners.read() {
+            for listener in listeners.iter() {
+                listener(event.clone());
+            }
+        }
+    }
+
+    /// Add a machine from the "+ Machine" form and connect it.
+    ///
+    /// Only connection *coordinates* are stored (§九): host, port, user and the
+    /// `~/.ssh/config` alias. Keys, passwords and passphrases never reach Spark.
+    pub async fn add_machine(&self, draft: &MachineDraft) -> Result<Machine> {
+        if !draft.is_valid() {
+            bail!("machine needs a name and either a host or an ssh config alias");
+        }
+        let id = MachineId::new();
+        let machine = draft.to_machine(id);
+        self.register(machine.clone());
+        self.persist(&machine)?;
+
+        // Connecting is best-effort here: a machine that is currently down must
+        // still be addable, and the UI shows why it is not connected.
+        if let Err(e) = self.connect_machine(&machine.id).await {
+            tracing::warn!(machine = %machine.id, "added machine failed to connect: {e}");
+        }
+        Ok(self
+            .get_machine(&machine.id)
+            .unwrap_or(machine))
+    }
+
+    /// Remove a machine, disconnecting first. Never touches remote runtimes of
+    /// *other* machines.
+    pub async fn remove_machine(&self, machine_id: &MachineId) -> Result<()> {
+        let handle = self.take_handle(machine_id)?;
+        if handle.transport.is_connected() {
+            let _ = handle.transport.disconnect().await;
+        }
+        if let Some(persistence) = &self.persistence {
+            let _ = persistence.delete_machine(machine_id.as_str());
+        }
+        self.emit(MachineEvent::Removed(machine_id.clone()));
+        Ok(())
+    }
+
+    fn take_handle(&self, machine_id: &MachineId) -> Result<MachineHandle> {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| anyhow!("machine registry lock poisoned"))?;
+        machines
+            .remove(machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))
+    }
+
+    fn persist(&self, machine: &Machine) -> Result<()> {
+        if let Some(persistence) = &self.persistence {
+            persistence.save_machine(machine)?;
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Lookup — the sync API tools use
+    // -----------------------------------------------------------------------
+
+    pub fn get_machine(&self, machine_id: &MachineId) -> Option<Machine> {
+        self.machines
+            .read()
+            .ok()?
+            .get(machine_id)
+            .map(|handle| handle.machine.clone())
+    }
+
+    pub fn list_machines(&self) -> Vec<Machine> {
+        self.machines
+            .read()
+            .map(|machines| machines.values().map(|h| h.machine.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn machine_ids(&self) -> Vec<MachineId> {
+        self.machines
+            .read()
+            .map(|machines| machines.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn default_machine_id(&self) -> MachineId {
+        MachineId::local()
+    }
+
+    /// **The routing call.** Every tool goes through here.
+    ///
+    /// Returning `Option` rather than an error keeps the tool layer simple: a
+    /// missing machine is a "no transport" condition the tool reports as a tool
+    /// error, not a crash.
+    pub fn transport(&self, machine_id: &MachineId) -> Option<Arc<dyn RuntimeTransport>> {
+        self.machines
+            .read()
+            .ok()?
+            .get(machine_id)
+            .map(|handle| handle.transport.clone())
+    }
+
+    /// The transport a runtime belongs to, checking the runtime's own record
+    /// when the caller only has a runtime id.
+    pub async fn transport_for_runtime(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
+        for handle in self.handles() {
+            if let Ok(info) = handle.transport.get_runtime(runtime_id).await {
+                if info.id == runtime_id {
+                    return Some(handle.transport.clone());
+                }
+            }
+        }
+        // Fall back to the local machine: a runtime created before machine
+        // support existed lives there.
+        self.transport(&MachineId::local())
+    }
+
+    /// Snapshot of every machine as cheap clones.
+    ///
+    /// The registry lock is released before the caller awaits anything, so a
+    /// slow SSH machine can never block a tool call on another machine.
+    fn handles(&self) -> Vec<HandleSnapshot> {
+        self.machines
+            .read()
+            .map(|machines| {
+                machines
+                    .values()
+                    .map(|handle| HandleSnapshot {
+                        machine: handle.machine.clone(),
+                        transport: handle.transport.clone(),
+                        ssh: handle.ssh.clone(),
+                        health: handle.health.clone(),
+                        connecting: handle.connecting.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
+    /// `ssh host true` + host key report, for the form's Test connection button.
+    pub async fn test_connection(&self, draft: &MachineDraft) -> Result<(), ConnectError> {
+        let machine = draft.to_machine(MachineId::new());
+        let transport = SshTransport::new(&machine);
+        transport.test_connection().await
+    }
+
+    /// Connect a machine (bootstrap included when sandd is missing).
+    pub async fn connect_machine(&self, machine_id: &MachineId) -> Result<()> {
+        let snapshot = self
+            .handles()
+            .into_iter()
+            .find(|handle| handle.id() == *machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        let transport = snapshot.transport.clone();
+
+        // One connect at a time per machine: two callers must never start two
+        // ssh processes for the same machine.
+        let _guard = snapshot.connecting.lock().await;
+        let was_bootstrapping = matches!(
+            self.get_machine(machine_id).map(|m| m.status),
+            Some(MachineStatus::Bootstrapping)
+        );
+        self.set_status(
+            machine_id,
+            if was_bootstrapping {
+                MachineStatus::Bootstrapping
+            } else {
+                MachineStatus::Connecting
+            },
+            None,
+        );
+
+        // SSH machines go through the typed path so a host key problem arrives
+        // as a fingerprint we can show, not as a string we have to re-parse.
+        if let Some(ssh) = snapshot.ssh.clone() {
+            return match ssh.connect_machine(true).await {
+                Ok(handshake) => {
+                    let latency = ssh.ping().await.ok();
+                    self.apply_handshake(machine_id, Some(handshake), latency);
+                    Ok(())
+                }
+                Err(error) => {
+                    self.record_connect_error(machine_id, &error);
+                    Err(anyhow!(error.message()))
+                }
+            };
         }
 
+        // Local machine: no SSH, just verify sandd answers.
+        match transport.connect().await {
+            Ok(()) => {
+                let handshake = transport.handshake().await.ok();
+                let latency = transport.ping().await.ok();
+                self.apply_handshake(machine_id, handshake, latency);
+                Ok(())
+            }
+            Err(e) => {
+                let message = e.to_string();
+                let status = MachineStatus::from_ssh_error(&message);
+                self.set_status(machine_id.clone(), status, Some(message.clone()));
+                Err(anyhow!(message))
+            }
+        }
+    }
+
+    /// Record a typed connection failure: status, detail, and — for host key
+    /// problems — an Attention event carrying the fingerprint.
+    fn record_connect_error(&self, machine_id: &MachineId, error: &ConnectError) {
+        self.set_status(
+            machine_id.clone(),
+            error.status(),
+            Some(error.message()),
+        );
+        if let Some(issue) = error.host_key_issue() {
+            // Remember the issue so [信任并连接] can write *this* key, and show
+            // the fingerprint: + [取消] [信任并连接] in the UI.
+            if let Ok(mut pending) = self.pending_host_keys.write() {
+                pending.insert(machine_id.clone(), issue.clone());
+            }
+            self.emit(MachineEvent::AttentionRequired {
+                machine_id: machine_id.clone(),
+                issue: Box::new(issue.clone()),
+            });
+        }
+        tracing::warn!(machine = %machine_id, "connect failed: {}", error.message());
+    }
+
+    /// The host key issue waiting for the user, if any.
+    pub fn pending_host_key(&self, machine_id: &MachineId) -> Option<spark_transport::HostKeyIssue> {
+        self.pending_host_keys
+            .read()
+            .ok()
+            .and_then(|pending| pending.get(machine_id).cloned())
+    }
+
+    /// The user pressed [信任并连接] on the Attention card.
+    ///
+    /// This is the **only** path that writes to `known_hosts`: it takes the
+    /// remembered issue (never a fingerprint that arrived from anywhere else),
+    /// writes the key line, then reconnects. A *changed* key expected a second
+    /// confirmation in the UI before this is called.
+    pub async fn trust_host_key(&self, machine_id: &MachineId) -> Result<()> {
+        let issue = self
+            .pending_host_key(machine_id)
+            .ok_or_else(|| anyhow!("no host key waiting for confirmation on {machine_id}"))?;
+        spark_transport::ssh::trust_host_key(&issue)
+            .context("writing the host key to known_hosts")?;
+        tracing::info!(
+            machine = %machine_id,
+            fingerprint = %issue.fingerprint(),
+            high_risk = issue.is_high_risk(),
+            "user confirmed the host key"
+        );
+        if let Ok(mut pending) = self.pending_host_keys.write() {
+            pending.remove(machine_id);
+        }
         self.connect_machine(machine_id).await
     }
 
-    // -----------------------------------------------------------------------
-    // Bootstrap (remote machines)
-    // -----------------------------------------------------------------------
-
-    /// Bootstrap a remote machine: detect platform, install sandd, start sandd.
-    async fn bootstrap_machine(&self, machine_id: &MachineId) -> Result<()> {
-        let handle = self.machines.get(machine_id)
-            .ok_or_else(|| anyhow!("machine not found"))?;
-
-        self.update_machine_status(machine_id, MachineStatus::Bootstrapping).await;
-
-        // Step 1: Detect platform
-        let platform = self.detect_platform(machine_id).await?;
-        tracing::info!(machine_id = %machine_id, platform = %platform, "detected platform");
-
-        // Step 2: Check sandd version
-        match self.check_sandd_version(machine_id).await {
-            Ok(version) => {
-                tracing::info!(machine_id = %machine_id, version = %version, "sandd already installed");
-                // sandd exists, just connect bridge
-                let _ = self.connect_machine(machine_id).await;
-                return Ok(());
-            }
-            Err(_) => {
-                // sandd not found, need to install
-            }
-        }
-
-        // Step 3: Install sandd (scp the binary)
-        let arch = platform.arch.clone();
-        let binary_path = self.download_and_upload_binary(machine_id, &arch).await?;
-        tracing::info!(machine_id = %machine_id, path = %binary_path, "sandd uploaded");
-
-        // Step 4: Start sandd
-        self.start_sandd_remote(machine_id).await?;
-        tracing::info!(machine_id = %machine_id, "sandd started");
-
-        // Step 5: Connect bridge
-        let _ = self.connect_machine(machine_id).await;
-
+    /// Disconnect the **bridge** only. Remote runtimes, PTYs, servers and Chrome
+    /// keep running (§十五).
+    pub async fn disconnect_machine(&self, machine_id: &MachineId) -> Result<()> {
+        let transport = self
+            .transport(machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        transport.disconnect().await?;
+        self.set_status(machine_id, MachineStatus::Disconnected, None);
         Ok(())
     }
 
-    /// Detect the remote platform (uname -s, uname -m).
-    async fn detect_platform(&self, machine_id: &MachineId) -> Result<PlatformInfo> {
-        let handle = self.machines.get(machine_id).unwrap();
-        let transport = handle.transport.as_ref().unwrap();
+    /// Reconnect with the §二十六 backoff schedule, then re-attach to whatever
+    /// runtimes are still alive on the machine.
+    ///
+    /// The decision to keep trying is made by the shared reconnect policy, so
+    /// "host key changed" or "auth failed" stops here and asks the user instead
+    /// of looping forever.
+    pub async fn reconnect_machine(&self, machine_id: &MachineId) -> Result<Vec<String>> {
+        let snapshot = self
+            .handles()
+            .into_iter()
+            .find(|handle| handle.id() == *machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        let transport = snapshot.transport.clone();
 
-        // Execute uname commands through the transport
-        let uname_s = transport.exec(ExecRequest {
-            runtime_id: RuntimeId::new(),
-            command: vec!["uname".to_string(), "-s".to_string()],
-            cwd: None,
-            env: HashMap::new(),
-            timeout_ms: Some(10000),
-            stdin_data: None,
-        }).await?;
-
-        let uname_m = transport.exec(ExecRequest {
-            runtime_id: RuntimeId::new(),
-            command: vec!["uname".to_string(), "-m".to_string()],
-            cwd: None,
-            env: HashMap::new(),
-            timeout_ms: Some(10000),
-            stdin_data: None,
-        }).await?;
-
-        let os = String::from_utf8_lossy(&uname_s.stdout).trim().to_string();
-        let arch = String::from_utf8_lossy(&uname_m.stdout).trim().to_string();
-
-        Ok(PlatformInfo {
-            os,
-            arch,
-            os_alias: map_os(&os),
-            arch_alias: map_arch(&arch),
-        })
-    }
-
-    async fn check_sandd_version(&self, machine_id: &MachineId) -> Result<String> {
-        let handle = self.machines.get(machine_id).unwrap();
-        let transport = handle.transport.as_ref().unwrap();
-
-        let result = transport.exec(ExecRequest {
-            runtime_id: RuntimeId::new(),
-            command: vec!["~/.local/share/spark/current/sandd".to_string(), "--version".to_string()],
-            cwd: None,
-            env: HashMap::new(),
-            timeout_ms: Some(5000),
-            stdin_data: None,
-        }).await?;
-
-        if result.exit_code != Some(0) {
-            bail!("sandd not found or not executable");
-        }
-
-        Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
-    }
-
-    async fn download_and_upload_binary(
-        &self,
-        machine_id: &MachineId,
-        arch: &str,
-    ) -> Result<String> {
-        // In a real implementation:
-        // 1. Look up the right binary for (os, arch) in versions/
-        // 2. scp it to the remote machine
-        // 3. Verify SHA256
-        // 4. Make executable
-
-        // For now, simulate success
-        Ok("~/.local/share/spark/current/sandd".to_string())
-    }
-
-    async fn start_sandd_remote(&self, machine_id: &MachineId) -> Result<()> {
-        let handle = self.machines.get(machine_id).unwrap();
-        let transport = handle.transport.as_ref().unwrap();
-
-        // Start sandd on remote
-        transport.exec(ExecRequest {
-            runtime_id: RuntimeId::new(),
-            command: vec![
-                "~/.local/share/spark/current/sandd".to_string(),
-                "--daemon".to_string(),
-            ],
-            cwd: None,
-            env: HashMap::new(),
-            timeout_ms: Some(30000),
-            stdin_data: None,
-        }).await?;
-
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // Handshake
-    // -----------------------------------------------------------------------
-
-    /// Perform bridge handshake to get remote machine info.
-    async fn perform_handshake(&self, machine_id: &MachineId) -> Result<BridgeHandshake> {
-        let handle = self.machines.get(machine_id).unwrap();
-        let transport = handle.transport.as_ref().unwrap();
-
-        // For SSH transport, we'd read/write through the bridge's stdio.
-        // This is a placeholder — real implementation would use
-        // tokio::process::ChildStdout/ChildStdin.
-
-        Ok(BridgeHandshake {
-            protocol_version: 1,
-            sandd_version: "0.1.0".to_string(),
-            features: vec!["exec".to_string(), "pty".to_string(), "fs".to_string()],
-            machine_id: machine_id.0.clone(),
-            os: "Linux".to_string(),
-            arch: "x86_64".to_string(),
-        })
-    }
-
-    /// Update machine metadata from a handshake response.
-    async fn update_machine_from_handshake(
-        &self,
-        machine_id: &MachineId,
-        handshake: &BridgeHandshake,
-    ) {
-        if let Some(handle) = self.machines.get(machine_id) {
-            let mut machine = handle.machine.clone();
-            machine.metadata = MachineMetadata {
-                os: Some(handshake.os.clone()),
-                arch: Some(handshake.arch.clone()),
-                sandd_version: Some(handshake.sandd_version.clone()),
-                latency_ms: Some(15),
-                ..Default::default()
+        let mut attempt = 0u32;
+        loop {
+            // Typed error for SSH (carries the host key fingerprint); the local
+            // machine cannot produce these, so any error is just an error.
+            let outcome = match snapshot.ssh.clone() {
+                Some(ssh) => match ssh.connect_machine(true).await {
+                    Ok(handshake) => {
+                        let latency = ssh.ping().await.ok();
+                        self.apply_handshake(machine_id, Some(handshake), latency);
+                        return Ok(self.attach_after_reconnect(&transport).await);
+                    }
+                    Err(error) => {
+                        spark_transport::reconnect::plan(
+                            &error,
+                            attempt,
+                            &self.reconnect,
+                            entropy(),
+                        )
+                    }
+                },
+                None => match transport.connect().await {
+                    Ok(()) => {
+                        let handshake = transport.handshake().await.ok();
+                        let latency = transport.ping().await.ok();
+                        self.apply_handshake(machine_id, handshake, latency);
+                        return Ok(self.attach_after_reconnect(&transport).await);
+                    }
+                    Err(e) => {
+                        let error = ConnectError::Unreachable(e.to_string());
+                        spark_transport::reconnect::plan(
+                            &error,
+                            attempt,
+                            &self.reconnect,
+                            entropy(),
+                        )
+                    }
+                },
             };
-            machine.last_seen_at = Some(chrono::Utc::now());
-            machine.status = MachineStatus::Connected;
 
-            // Update the handle
-            // (in real code, use interior mutability)
+            match outcome {
+                ReconnectOutcome::RetryAfter(delay) => {
+                    self.set_status(
+                        machine_id.clone(),
+                        MachineStatus::Unreachable,
+                        Some(format!(
+                            "{} (attempt {})",
+                            spark_transport::reconnect::describe_wait(delay),
+                            attempt + 1
+                        )),
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                ReconnectOutcome::RequiresUserAction(message) => {
+                    self.set_status(
+                        machine_id.clone(),
+                        MachineStatus::RequiresUserAction,
+                        Some(message.clone()),
+                    );
+                    if let Some(ssh) = snapshot.ssh.clone() {
+                        if let Err(error) = ssh.connect_machine(false).await {
+                            self.record_connect_error(machine_id, &error);
+                        }
+                    }
+                    bail!("{message}");
+                }
+                ReconnectOutcome::GiveUp(message) => {
+                    self.set_status(
+                        machine_id.clone(),
+                        MachineStatus::Error,
+                        Some(message.clone()),
+                    );
+                    bail!("{message}");
+                }
+            }
+        }
+    }
+
+    /// After a reconnect: find the runtimes that survived and report them.
+    ///
+    /// This is the recovery half of "disconnect ≠ destroy": the machine is
+    /// reachable again, and the work that was running is still there.
+    async fn attach_after_reconnect(&self, transport: &Arc<dyn RuntimeTransport>) -> Vec<String> {
+        match transport.list_runtimes().await {
+            Ok(runtimes) => {
+                let ids: Vec<String> = runtimes.into_iter().map(|r| r.id).collect();
+                tracing::info!("reconnected: {} runtime(s) still alive", ids.len());
+                ids
+            }
+            Err(e) => {
+                tracing::warn!("reconnected but ListRuntimes failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Force a bootstrap (re-install sandd) and reconnect.
+    pub async fn bootstrap_machine(&self, machine_id: &MachineId) -> Result<spark_transport::BootstrapReport> {
+        let snapshot = self
+            .handles()
+            .into_iter()
+            .find(|handle| handle.id() == *machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        let transport = snapshot
+            .ssh
+            .ok_or_else(|| anyhow!("bootstrap is only meaningful for SSH machines"))?;
+
+        self.set_status(machine_id.clone(), MachineStatus::Bootstrapping, None);
+        let report = spark_transport::ssh::bootstrap::bootstrap(&transport)
+            .await
+            .map_err(anyhow::Error::from)?;
+        // Bootstrap only installs and starts sandd; the bridge is (re)started
+        // by the connect that follows, so do it here and handshake for real.
+        if let Ok(handshake) = transport.connect_machine(false).await {
+            let latency = transport.ping().await.ok();
+            self.apply_handshake(machine_id, Some(handshake), latency);
+        }
+        Ok(report)
+    }
+
+    // -----------------------------------------------------------------------
+    // Health
+    // -----------------------------------------------------------------------
+
+    /// Ping every connected machine once (Ping/Pong over the existing bridge —
+    /// never `ssh hostname`, §二十七).
+    pub async fn health_check_once(&self) -> Vec<(MachineId, MachineStatus)> {
+        let mut out = Vec::new();
+        for handle in self.handles() {
+            let machine_id = handle.id();
+            if !handle.transport.is_connected() {
+                continue;
+            }
+            match handle.transport.ping().await {
+                Ok(latency) => {
+                    let status = status_for_latency(Some(latency));
+                    if let Ok(mut health) = handle.health.try_lock() {
+                        health.latency_ms = Some(latency);
+                        health.checked_at = Some(Instant::now());
+                        health.last_error = None;
+                        health.failures = 0;
+                        health.attempts = 0;
+                    }
+                    self.update_machine(machine_id.clone(), |machine| {
+                        machine.touch(latency);
+                        machine.status = status.clone();
+                    });
+                    out.push((machine_id, status));
+                }
+                Err(e) => {
+                    let message = e.to_string();
+                    if let Ok(mut health) = handle.health.try_lock() {
+                        health.failures += 1;
+                        health.last_error = Some(message.clone());
+                    }
+                    // The bridge is gone: the machine is Disconnected, *not* its
+                    // runtimes. A task on it shows "connection lost" and waits.
+                    self.set_status(
+                        machine_id.clone(),
+                        MachineStatus::Disconnected,
+                        Some(message),
+                    );
+                    out.push((machine_id, MachineStatus::Disconnected));
+                }
+            }
+        }
+        out
+    }
+
+    /// Background health loop (started by host-agent).
+    pub async fn run_health_loop(self: Arc<Self>) {
+        *self.running.write().unwrap() = true;
+        let mut ticker = tokio::time::interval(HEALTH_INTERVAL);
+        loop {
+            ticker.tick().await;
+            if !*self.running.read().unwrap() {
+                return;
+            }
+            self.health_check_once().await;
+        }
+    }
+
+    pub fn stop(&self) {
+        *self.running.write().unwrap() = false;
+    }
+
+    /// Connect every saved non-local machine at startup.
+    pub async fn connect_saved_machines(&self) {
+        for machine in self.list_machines() {
+            if matches!(machine.kind, MachineKind::Local) {
+                continue;
+            }
+            // Best effort: a machine that is down must not stop host-agent.
+            let _ = self.connect_machine(&machine.id).await;
         }
     }
 
     // -----------------------------------------------------------------------
-    // Runtime routing
+    // Runtime creation helper (one place that knows machine + kind + workspace)
     // -----------------------------------------------------------------------
 
-    /// Get the transport for a given machine.
-    pub fn transport(&self, machine_id: &MachineId) -> Option<Arc<dyn RuntimeTransport>> {
-        self.machines.get(machine_id)
-            .and_then(|h| h.transport.clone())
-    }
-
-    /// Create a Runtime on a specific machine.
-    pub async fn create_runtime_on_machine(
+    /// Create a runtime on a machine, choosing a workspace default per kind.
+    pub async fn create_runtime(
         &self,
         machine_id: &MachineId,
-        request: CreateRuntimeRequest,
-    ) -> Result<RuntimeInfo> {
-        let transport = self.transport(machine_id)
-            .ok_or_else(|| anyhow!("machine not found or not connected: {}", machine_id))?;
-
-        if !transport.is_connected() {
-            bail!("machine not connected: {}", machine_id);
-        }
-
+        kind: &str,
+        workspace: Option<String>,
+    ) -> Result<spark_transport::RuntimeInfo> {
+        let transport = self
+            .transport(machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        let workspace = match workspace {
+            Some(path) => std::path::PathBuf::from(path),
+            None => default_workspace(&self.get_machine(machine_id), kind),
+        };
+        let request = spark_transport::CreateRuntimeRequest::new(kind, workspace)
+            .on_machine(machine_id.clone());
         transport.create_runtime(request).await
     }
 
-    /// Execute a command on a Runtime on a specific machine.
-    pub async fn exec_on_machine(
-        &self,
-        machine_id: &MachineId,
-        exec_request: sand_protocol::ExecRequest,
-    ) -> Result<sand_protocol::ExecResult> {
-        let transport = self.transport(machine_id)
-            .ok_or_else(|| anyhow!("machine not found or not connected: {}", machine_id))?;
-
-        if !transport.is_connected() {
-            bail!("machine not connected: {}", machine_id);
-        }
-
-        transport.exec(exec_request).await
-    }
-
-    /// Destroy a Runtime on a specific machine.
-    pub async fn destroy_runtime_on_machine(
-        &self,
-        machine_id: &MachineId,
-        runtime_id: &str,
-    ) -> Result<()> {
-        let transport = self.transport(machine_id)
-            .ok_or_else(|| anyhow!("machine not found or not connected: {}", machine_id))?;
-
+    /// Destroy a runtime (**only** the runtime — never the machine's sandd).
+    pub async fn destroy_runtime(&self, machine_id: &MachineId, runtime_id: &str) -> Result<()> {
+        let transport = self
+            .transport(machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
         transport.destroy_runtime(runtime_id).await
     }
 
-    // -----------------------------------------------------------------------
-    // Health / Ping
-    // -----------------------------------------------------------------------
-
-    /// Ping all connected machines and update status.
-    pub async fn ping_all(&self) {
-        let machines: Vec<MachineId> = self.machines.keys().cloned().collect();
-
-        for machine_id in machines {
-            let handle = match self.machines.get(&machine_id) {
-                Some(h) => h,
-                None => continue,
-            };
-
-            if !handle.machine.status.is_connected() {
-                continue;
-            }
-
-            match handle.transport.as_ref() {
-                Some(transport) => {
-                    match transport.ping().await {
-                        Ok(latency) => {
-                            // Update metadata with latency
-                            let mut metadata = handle.machine.metadata.clone();
-                            metadata.latency_ms = Some(latency);
-
-                            // Classify: <100ms good, 100-500ms slow, >500ms degraded
-                            let new_status = if latency < 100 {
-                                MachineStatus::Connected
-                            } else if latency < 500 {
-                                MachineStatus::Connected // still connected but slow
-                            } else {
-                                MachineStatus::Degraded
-                            };
-
-                            drop(transport);
-                            let _ = self.update_machine_status(&machine_id, new_status).await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(machine_id = %machine_id, error = %e, "ping failed");
-                            let _ = self.update_machine_status(&machine_id, MachineStatus::Degraded).await;
-                        }
-                    }
-                }
-                None => {}
-            }
-        }
+    pub async fn list_runtimes(&self, machine_id: &MachineId) -> Result<Vec<spark_transport::RuntimeInfo>> {
+        let transport = self
+            .transport(machine_id)
+            .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
+        transport.list_runtimes().await
     }
 
     // -----------------------------------------------------------------------
-    // Status update helper
+    // Internals
     // -----------------------------------------------------------------------
 
-    async fn update_machine_status(
+    fn update_machine<F: FnOnce(&mut Machine)>(&self, machine_id: MachineId, update: F) {
+        let updated = {
+            let mut machines = match self.machines.write() {
+                Ok(machines) => machines,
+                Err(_) => return,
+            };
+            match machines.get_mut(&machine_id) {
+                Some(handle) => {
+                    update(&mut handle.machine);
+                    Some(handle.machine.clone())
+                }
+                None => None,
+            }
+        };
+        if let Some(machine) = updated {
+            self.emit(MachineEvent::MetadataUpdated(machine));
+        }
+    }
+
+    fn set_status(
+        &self,
+        machine_id: MachineId,
+        status: MachineStatus,
+        detail: Option<String>,
+    ) {
+        let notify = self
+            .get_machine(&machine_id)
+            .map(|machine| machine.status != status)
+            .unwrap_or(false);
+        self.update_machine(machine_id.clone(), |machine| {
+            machine.status = status.clone();
+            if status == MachineStatus::Connected {
+                machine.last_seen_at = Some(chrono::Utc::now());
+            }
+        });
+        if let Some(machine) = self.get_machine(&machine_id) {
+            self.emit(MachineEvent::StatusChanged {
+                machine_id: machine_id.clone(),
+                status: machine.status,
+                detail,
+            });
+        } else if notify {
+            self.emit(MachineEvent::StatusChanged {
+                machine_id,
+                status,
+                detail,
+            });
+        }
+    }
+
+    /// Fold a handshake into the machine record: metadata, capabilities, status.
+    fn apply_handshake(
         &self,
         machine_id: &MachineId,
-        status: MachineStatus,
-    ) -> Result<()> {
-        if let Some(handle) = self.machines.get(machine_id) {
-            let mut machine = handle.machine.clone();
-            machine.status = status;
-            machine.last_seen_at = Some(chrono::Utc::now());
-
-            // In real code, this would update via interior mutability.
-            // For now, we just log.
-            tracing::debug!(machine_id = %machine_id, status = %status, "machine status updated");
+        handshake: Option<spark_transport::HandshakeResponse>,
+        latency: Option<u64>,
+    ) {
+        let Some(handshake) = handshake else {
+            self.set_status(machine_id.clone(), MachineStatus::Connected, None);
+            return;
+        };
+        if let Ok(mut pending) = self.pending_host_keys.write() {
+            pending.remove(machine_id);
         }
-        Ok(())
+        let status = status_for_latency(latency.or(handshake.latency_ms));
+        let metadata = handshake.metadata();
+        let capabilities = handshake.capabilities();
+        let version = handshake.sandd_version.clone();
+        self.update_machine(machine_id.clone(), |machine| {
+            machine.metadata = metadata.clone();
+            machine.capabilities = capabilities.clone();
+            machine.status = status.clone();
+            if latency.is_some() {
+                machine.metadata.latency_ms = latency;
+            }
+            machine.last_seen_at = Some(chrono::Utc::now());
+            if machine.display_name.is_none() && !handshake.hostname.is_empty() {
+                machine.display_name = Some(handshake.hostname.clone());
+            }
+        });
+        if let Some(machine) = self.get_machine(machine_id) {
+            self.emit(MachineEvent::MetadataUpdated(machine.clone()));
+            if let Err(e) = self.persist(&machine) {
+                tracing::debug!("cannot persist machine metadata: {e}");
+            }
+        }
+        tracing::info!(
+            machine = %machine_id,
+            sandd = %version,
+            latency = ?latency,
+            status = status.as_str(),
+            "machine handshake complete"
+        );
+    }
+
+    /// Message for the Attention card when a machine is blocked on the user
+    /// (unknown host key, changed key, auth failure). `None` when it is fine.
+    pub fn attention_message(&self, machine_id: &MachineId) -> Option<String> {
+        let machine = self.get_machine(machine_id)?;
+        match machine.status {
+            MachineStatus::RequiresUserAction => Some(format!(
+                "{} 需要你确认才能继续连接（主机密钥或认证问题）",
+                machine.display_name.clone().unwrap_or_else(|| machine.name.clone())
+            )),
+            MachineStatus::Unreachable => Some(format!(
+                "{} 暂时无法连接，Spark 会在后台重试",
+                machine.display_name.clone().unwrap_or_else(|| machine.name.clone())
+            )),
+            MachineStatus::Error => Some(format!(
+                "{} 连接失败，可能需要重新 bootstrap",
+                machine.display_name.clone().unwrap_or_else(|| machine.name.clone())
+            )),
+            _ => None,
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Platform detection helpers
-// ---------------------------------------------------------------------------
-
-struct PlatformInfo {
-    os: String,
-    arch: String,
-    os_alias: String,
-    arch_alias: String,
-}
-
-fn map_os(os: &str) -> String {
-    match os.to_lowercase().as_str() {
-        "linux" => "linux".to_string(),
-        "darwin" => "macos".to_string(),
-        "freebsd" => "freebsd".to_string(),
-        _ => os.to_lowercase(),
+impl Default for MachineManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-fn map_arch(arch: &str) -> String {
-    match arch.to_lowercase().as_str() {
-        "x86_64" | "amd64" => "x86_64".to_string(),
-        "aarch64" | "arm64" => "aarch64".to_string(),
-        "armv7l" => "armv7".to_string(),
-        _ => arch.to_lowercase(),
+/// Default workspace per runtime kind, computed **on the target machine's**
+/// filesystem layout (a remote machine does not have our `$HOME`).
+pub fn default_workspace(machine: &Option<Machine>, kind: &str) -> std::path::PathBuf {
+    let base = match machine.as_ref().map(|m| &m.kind) {
+        Some(MachineKind::Ssh { .. }) => std::path::PathBuf::from("~/spark"),
+        _ => std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            .join("spark"),
+    };
+    match kind {
+        "task" | "workbench" | "eval" | "assistant" => base.join(kind),
+        other => base.join(other),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unit tests (basic)
-// ---------------------------------------------------------------------------
+/// Entropy for jitter: the clock, which is plenty for de-synchronizing clients.
+fn entropy() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Convenience for callers that only have an error string.
+pub fn status_from_error(error: &str) -> MachineStatus {
+    MachineStatus::from_ssh_error(error)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_local_machine() {
-        let mgr = MachineManager::new();
-        let machines = mgr.list_machines();
+    #[test]
+    fn latency_thresholds_match_the_architecture() {
+        assert_eq!(status_for_latency(Some(20)), MachineStatus::Connected);
+        assert_eq!(status_for_latency(Some(99)), MachineStatus::Connected);
+        assert_eq!(status_for_latency(Some(100)), MachineStatus::Degraded);
+        assert_eq!(status_for_latency(Some(500)), MachineStatus::Degraded);
+        assert_eq!(status_for_latency(Some(501)), MachineStatus::Degraded);
+        assert_eq!(status_for_latency(None), MachineStatus::Disconnected);
+    }
+
+    #[test]
+    fn default_workspace_is_per_machine() {
+        let local = Machine::local(None);
+        let path = default_workspace(&Some(local), "task");
+        assert!(path.ends_with("task"));
+        assert!(path.is_absolute(), "local workspace: {path:?}");
+
+        let remote = Machine::ssh(
+            MachineId::from_string("mach-x".into()),
+            "devbox".into(),
+            "10.0.0.42".into(),
+            22,
+            None,
+            None,
+        );
+        // A remote machine does not share our $HOME: the path must be relative
+        // to the user's home *there*, which sandd expands.
+        let remote_path = default_workspace(&Some(remote), "workbench");
+        assert_eq!(remote_path, std::path::PathBuf::from("~/spark/workbench"));
+    }
+
+    #[test]
+    fn registry_starts_with_local_and_routes_by_id() {
+        let manager = MachineManager::new();
+        let machines = manager.list_machines();
         assert_eq!(machines.len(), 1);
-        assert!(machines[0].kind.is_local());
+        assert!(matches!(machines[0].kind, MachineKind::Local));
+
+        let local_transport = manager.transport(&MachineId::local()).expect("local transport");
+        assert_eq!(local_transport.machine_id(), MachineId::local());
+        assert!(manager.transport(&MachineId::from_string("mach-nope".into())).is_none());
     }
 
     #[tokio::test]
-    async fn test_add_ssh_machine() {
-        let mgr = MachineManager::new();
+    async fn adding_a_machine_registers_it_even_when_ssh_is_unavailable() {
+        let manager = MachineManager::new();
+        // Port 1 on localhost: nothing is listening, so the connect attempt must
+        // fail without stopping the machine from being registered.
+        let draft = MachineDraft::new("dead", "127.0.0.1").with_port(1);
+        let machine = manager.add_machine(&draft).await.expect("machine added");
+        assert_eq!(machine.name, "dead");
+        assert!(manager.transport(&machine.id).is_some());
+        assert!(manager.list_machines().len() >= 2);
+        // Status reflects the failure rather than pretending to be connected.
+        let stored = manager.get_machine(&machine.id).unwrap();
+        assert!(!stored.status.is_connected());
+    }
 
-        let ssh_machine = Machine::ssh(
-            MachineId::new(),
-            "devbox".to_string(),
-            "10.0.0.42".to_string(),
-            22,
-            Some("dev".to_string()),
-            Some("devbox".to_string()), // SSH config host alias
+    #[tokio::test]
+    async fn removing_a_machine_drops_its_transport() {
+        let manager = MachineManager::new();
+        let draft = MachineDraft::new("temp", "127.0.0.1").with_port(1);
+        let machine = manager.add_machine(&draft).await.unwrap();
+        manager.remove_machine(&machine.id).await.unwrap();
+        assert!(manager.get_machine(&machine.id).is_none());
+        assert!(manager.transport(&machine.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn health_check_skips_disconnected_machines() {
+        let manager = MachineManager::new();
+        let results = manager.health_check_once().await;
+        // Local transport has no connection yet: nothing to ping, no crash.
+        assert!(results.is_empty() || results.iter().all(|(_, s)| *s != MachineStatus::Connected));
+    }
+
+    #[test]
+    fn attention_message_only_when_blocked() {
+        let manager = MachineManager::new();
+        assert!(manager.attention_message(&MachineId::local()).is_none());
+        manager.set_status(
+            MachineId::local(),
+            MachineStatus::RequiresUserAction,
+            Some("host key".into()),
         );
+        let message = manager.attention_message(&MachineId::local()).expect("attention");
+        assert!(message.contains("确认"), "got {message}");
+    }
 
-        mgr.add_machine(ssh_machine).await.unwrap();
-        let machines = mgr.list_machines();
-        assert_eq!(machines.len(), 2); // local + ssh
+    #[tokio::test]
+    async fn trusting_a_host_key_requires_a_pending_issue() {
+        let manager = MachineManager::new();
+        let id = MachineId::from_string("mach-unknown".into());
+        // Nothing remembered: [信任并连接] must not invent a key.
+        assert!(manager.pending_host_key(&id).is_none());
+        let trusted = manager.trust_host_key(&id).await;
+        assert!(trusted.is_err(), "trusting without an issue must fail");
+    }
+
+    #[test]
+    fn events_reach_listeners() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let manager = MachineManager::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        manager.subscribe(Arc::new(move |_event| {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+        }));
+        manager.set_status(MachineId::local(), MachineStatus::Connected, None);
+        assert!(counter.load(Ordering::Relaxed) > 0);
     }
 }

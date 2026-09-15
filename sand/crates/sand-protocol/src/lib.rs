@@ -2,6 +2,30 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod frame;
+pub mod status;
+
+/// Version of the sandd binary itself.
+pub const SANDB_VERSION: &str = "0.1.0";
+
+/// Version of the sand RPC protocol (independent from the sandd binary
+/// version). Bump whenever request/response shapes change incompatibly.
+pub const SAND_PROTOCOL_VERSION: u32 = 2;
+
+/// Feature flags advertised in the bridge handshake.
+pub const SAND_FEATURES: &[&str] = &[
+    "exec",
+    "pty",
+    "fs",
+    "fs.patch",
+    "fs.glob",
+    "screenshot",
+    "computer",
+    "events",
+    "handshake",
+    "runtime.machine_id",
+];
+
 // ---------------------------------------------------------------------------
 // MachineId — machines are first-class in the protocol.
 // ---------------------------------------------------------------------------
@@ -12,8 +36,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // MachineId is used to route all Runtime operations:
 //   Runtime → MachineId → Transport (LocalTransport / SshTransport)
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MachineId(pub String);
+
+/// Stable, human-recognisable machine id derived from a host fingerprint.
+///
+/// The seed is normally `/etc/machine-id` or the hostname. Ids are *identity*,
+/// not secrets, so a 64-bit FNV-1a hash of the seed is enough: the goal is only
+/// to tell machines apart across reconnects.
+pub fn host_machine_id(seed: &str) -> MachineId {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in seed.trim().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    MachineId(format!("mach-{:012x}", hash & 0xffff_ffff_ffff))
+}
+
+/// Best-effort fingerprint of the local host, used when a runtime is created
+/// without an explicit machine id.
+pub fn local_host_machine_id() -> MachineId {
+    if let Ok(content) = std::fs::read_to_string("/etc/machine-id") {
+        if !content.trim().is_empty() {
+            return host_machine_id(&content);
+        }
+    }
+    if let Ok(hostname) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        if !hostname.trim().is_empty() {
+            return host_machine_id(&hostname);
+        }
+    }
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        if !hostname.trim().is_empty() {
+            return host_machine_id(&hostname);
+        }
+    }
+    host_machine_id("unknown-host")
+}
 
 impl MachineId {
     pub fn new() -> Self {
@@ -40,6 +99,13 @@ impl MachineId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// `machine-local` is the well known id of the machine that runs
+    /// host-agent itself (kept for backwards compatibility with existing
+    /// datasets); any other id is a host-fingerprint id.
+    pub fn is_local(&self) -> bool {
+        self.0 == "machine-local"
     }
 }
 
@@ -258,6 +324,13 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+impl Runtime {
+    /// Canonical persisted machine id string.
+    pub fn machine_id_str(&self) -> &str {
+        self.machine_id.as_str()
+    }
 }
 
 // Simple JSON-like serialization without serde for persistence

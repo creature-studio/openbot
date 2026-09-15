@@ -7,6 +7,7 @@ pub mod api;
 pub mod persistence;
 pub mod workbench;
 pub mod machine;
+pub mod serve;
 
 pub use agent::{AgentSession, AgentSessionId, AgentStatus, Attention, AgentContext, AgentLoop, Task, TaskManager};
 pub use model::{Model, ModelResponse, MockModel, OpenAICompatibleModel};

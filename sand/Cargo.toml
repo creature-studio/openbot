@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sand-protocol",
+    "crates/sand-bridge",
     "crates/sand-client",
     "crates/sandd",
     "crates/sand-cli",

@@ -65,6 +65,9 @@ pub struct TaskSummary {
     pub id: TaskId,
     pub goal: String,
     pub status: TaskStatus,
+    /// The machine this task runs on. Fixed when the task is created
+    /// (see architecture §二十一: no live migration in v1).
+    pub machine_id: super::machine::MachineId,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -81,14 +84,19 @@ pub struct TaskDetail {
     pub session_id: String,
     pub runtime_id: String,
 
+    /// Machine the runtime lives on. Chosen at creation, never changed while
+    /// the task runs.
+    pub machine_id: super::machine::MachineId,
+
     /// Rich timeline of events.
     pub timeline: Vec<super::timeline::TimelineItem>,
 
     /// Active attention, if any.
     pub attention: Option<super::attention::Attention>,
 
-    /// Artifacts produced by the task.
-    pub artifacts: Vec<String>,
+    /// Artifacts produced by the task. Remote artifacts stay on their machine
+    /// until the user asks to download them (`downloaded == false`).
+    pub artifacts: Vec<Artifact>,
 
     /// Browser snapshot URL (screenshot stream endpoint).
     pub browser_url: Option<String>,
@@ -102,6 +110,47 @@ pub struct TaskDetail {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Artifact (remote-aware)
+// ---------------------------------------------------------------------------
+
+/// A file produced by a task. Artifacts live on the machine that produced
+/// them: nothing is copied to the client until the user asks for it
+/// (architecture §二十六).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artifact {
+    pub machine_id: super::machine::MachineId,
+    pub runtime_id: String,
+
+    /// Absolute path on `machine_id`.
+    pub remote_path: String,
+
+    pub size: u64,
+
+    /// MIME type when known (`image/png`, `application/zip`, ...).
+    pub mime: Option<String>,
+
+    /// True when the bytes are available locally (already fetched).
+    pub downloaded: bool,
+
+    pub created_at: DateTime<Utc>,
+}
+
+impl Artifact {
+    pub fn name(&self) -> &str {
+        self.remote_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(self.remote_path.as_str())
+    }
+
+    /// Small artifacts are worth fetching eagerly; large ones wait for a
+    /// `Download` click.
+    pub fn is_small(&self) -> bool {
+        self.size <= 256 * 1024
+    }
 }
 
 // ---------------------------------------------------------------------------

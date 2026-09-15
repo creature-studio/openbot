@@ -170,9 +170,11 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
             let workspace = extract_string_field(req_str, "workspace");
             let kind = RuntimeKind::from_str(&kind_str);
             let ws_path = workspace.map(|s| PathBuf::from(s));
-            match mgr.create_runtime(kind, ws_path) {
+            let machine_id = extract_string_field(req_str, "machine_id")
+                .map(sand_protocol::MachineId::from_string);
+            match mgr.create_runtime_on_machine(kind, ws_path, machine_id) {
                 Ok(rt) => {
-                    format!("{{\"ok\":true,\"id\":\"{}\",\"kind\":\"{}\",\"workspace\":\"{}\"}}", rt.id.0, rt.kind.as_str(), rt.workspace.display())
+                    format!("{{\"ok\":true,\"id\":\"{}\",\"kind\":\"{}\",\"workspace\":\"{}\",\"machine_id\":\"{}\"}}", rt.id.0, rt.kind.as_str(), rt.workspace.display(), escape_json(rt.machine_id.as_str()))
                 }
                 Err(e) => {
                     format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e))
@@ -183,7 +185,7 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
             let id_str = extract_string_field(req_str, "id").unwrap_or_default();
             let id = RuntimeId::from_string(id_str);
             if let Some(rt) = mgr.get_runtime(&id) {
-                format!("{{\"ok\":true,\"id\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\",\"workspace\":\"{}\",\"procs\":{},\"ptys\":{}}}", rt.id.0, rt.kind.as_str(), rt.state.as_str(), rt.workspace.display(), rt.process_count, rt.pty_count)
+                format!("{{\"ok\":true,\"id\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\",\"workspace\":\"{}\",\"procs\":{},\"ptys\":{},\"machine_id\":\"{}\"}}", rt.id.0, rt.kind.as_str(), rt.state.as_str(), rt.workspace.display(), rt.process_count, rt.pty_count, escape_json(rt.machine_id.as_str()))
             } else {
                 format!("{{\"ok\":false,\"error\":\"runtime not found\"}}")
             }
@@ -192,7 +194,7 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
             let list = mgr.list_runtimes();
             let mut items = Vec::new();
             for rt in list {
-                items.push(format!("{{\"id\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\",\"procs\":{},\"ptys\":{}}}", rt.id.0, rt.kind.as_str(), rt.state.as_str(), rt.process_count, rt.pty_count));
+                items.push(format!("{{\"id\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\",\"workspace\":\"{}\",\"procs\":{},\"ptys\":{},\"machine_id\":\"{}\"}}", rt.id.0, rt.kind.as_str(), rt.state.as_str(), rt.workspace.display(), rt.process_count, rt.pty_count, escape_json(rt.machine_id.as_str())));
             }
             format!("{{\"ok\":true,\"runtimes\":[{}]}}", items.join(","))
         }
@@ -358,24 +360,76 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
         }
         "Status" => {
             let list = mgr.list_runtimes();
-            format!("{{\"ok\":true,\"runtime_count\":{},\"version\":\"0.1.0\"}}", list.len())
+            let machine = sand_protocol::status::machine_info_json();
+            format!("{{\"ok\":true,\"runtime_count\":{},\"version\":\"{}\",\"protocol_version\":{},{}}}", list.len(), sand_protocol::SANDB_VERSION, sand_protocol::SAND_PROTOCOL_VERSION, machine)
+        }
+        // Version negotiation. Runs before any runtime exists, which is why
+        // every field here must be derivable locally by sandd alone.
+        "Handshake" => {
+            let client_protocol = extract_number_field(req_str, "protocol_version").unwrap_or(0) as u32;
+            let compatible = client_protocol == sand_protocol::SAND_PROTOCOL_VERSION;
+            // Features are probed per machine (node? Xvfb? xdotool?) so the
+            // client can enable/hide panels honestly.
+            let features: Vec<String> = crate::capabilities::features()
+                .iter()
+                .map(|f| format!("\"{}\"", f))
+                .collect();
+            let info = sand_protocol::status::machine_info();
+            let gpu_json = match &info.gpu {
+                Some(gpu) => format!("\"{}\"", escape_json(gpu)),
+                None => "null".to_string(),
+            };
+            format!(
+                "{{\"ok\":true,\"protocol_version\":{},\"sandd_version\":\"{}\",\"compatible\":{},\"features\":[{}],\"machine_id\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"hostname\":\"{}\",\"kernel\":\"{}\",\"uptime_seconds\":{},\"cpu_cores\":{},\"memory_total\":{},\"gpu\":{}}}",
+                sand_protocol::SAND_PROTOCOL_VERSION,
+                sand_protocol::SANDB_VERSION,
+                compatible,
+                features.join(","),
+                escape_json(&info.machine_id),
+                escape_json(&info.os),
+                escape_json(&info.arch),
+                escape_json(&info.hostname),
+                escape_json(&info.kernel),
+                info.uptime_seconds,
+                info.cpu_cores,
+                info.memory_total,
+                gpu_json,
+            )
         }
         "ListEvents" => {
+            // `since` makes polling incremental: the bridge (and therefore a
+            // reconnecting client) only ever receives events it has not seen.
+            let since = extract_number_field(req_str, "since").unwrap_or(0);
             let id_str = extract_string_field(req_str, "id");
-            let events = if let Some(id_s) = id_str {
-                let rid = RuntimeId::from_string(id_s);
-                mgr.event_bus().list_for(&rid)
-            } else {
-                mgr.event_bus().list()
+            let events = match id_str {
+                Some(id_s) => mgr
+                    .event_bus()
+                    .list_since(Some(&RuntimeId::from_string(id_s)), since),
+                None => mgr.event_bus().list_since(None, since),
             };
             let mut items = Vec::new();
-            for ev in events.iter().rev().take(100) {
-                items.push(format!("{{\"runtime_id\":\"{}\",\"kind\":\"{}\",\"at_ms\":{}}}", ev.runtime_id.0, ev.kind.as_str(), ev.at_ms));
+            for (event_id, ev) in events.iter() {
+                items.push(format!(
+                    "{{\"event_id\":{},\"runtime_id\":\"{}\",\"kind\":\"{}\",\"at_ms\":{}}}",
+                    event_id,
+                    ev.runtime_id.0,
+                    ev.kind.as_str(),
+                    ev.at_ms
+                ));
             }
-            format!("{{\"ok\":true,\"events\":[{}]}}", items.join(","))
+            format!(
+                "{{\"ok\":true,\"last_event_id\":{},\"events\":[{}]}}",
+                mgr.event_bus().last_id(),
+                items.join(",")
+            )
         }
         "SubscribeEvents" => {
             format!("{{\"ok\":false,\"error\":\"use streaming handler\"}}")
+        }
+        // Cheap liveness probe used by MachineManager health checks over the
+        // bridge: no runtime state touched, no subprocess spawned.
+        "Ping" => {
+            format!("{{\"ok\":true,\"at_ms\":{}}}", sand_protocol::now_ms())
         }
         "EnsureDisplay" => {
             let id_str = extract_string_field(req_str, "id").unwrap_or_default();
@@ -473,13 +527,227 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
                 Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
             }
         }
+        // ----- Remote browser (proxied to the runtime's worker) -----
+        "BrowserOpen" | "BrowserSnapshot" | "BrowserClick" | "BrowserFill" | "BrowserPress" | "BrowserScroll" | "BrowserTabs" | "BrowserClose" | "BrowserScreenshot" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let cgroup = mgr.cgroup_manager().runtime_cgroup_path(&id_str);
+            let cgroup_opt = if cgroup.exists() { Some(cgroup) } else { None };
+            let browser = mgr.browser_manager();
+
+            if !browser.available() {
+                return format!(
+                    "{{\"ok\":false,\"unsupported\":true,\"error\":\"{}\"}}",
+                    escape_json("browser worker not available on this machine")
+                );
+            }
+
+            let action = match method.as_str() {
+                "BrowserOpen" => "open",
+                "BrowserSnapshot" => "snapshot",
+                "BrowserClick" => "click",
+                "BrowserFill" => "fill",
+                "BrowserPress" => "press",
+                "BrowserScroll" => "scroll",
+                "BrowserTabs" => "tabs",
+                "BrowserClose" => "close",
+                _ => "screenshot",
+            };
+
+            // Forward the body sandd received; the worker understands the same
+            // field names (url, ref, value, key, x, y).
+            let body = if action == "open" {
+                format!(
+                    "{{\"url\":\"{}\"}}",
+                    escape_json(&extract_string_field(req_str, "url").unwrap_or_default())
+                )
+            } else if action == "click" {
+                format!(
+                    "{{\"ref\":\"{}\"}}",
+                    escape_json(
+                        &extract_string_field(req_str, "ref")
+                            .or_else(|| extract_string_field(req_str, "reference"))
+                            .unwrap_or_default()
+                    )
+                )
+            } else if action == "fill" {
+                format!(
+                    "{{\"ref\":\"{}\",\"value\":\"{}\"}}",
+                    escape_json(
+                        &extract_string_field(req_str, "ref")
+                            .or_else(|| extract_string_field(req_str, "reference"))
+                            .unwrap_or_default()
+                    ),
+                    escape_json(&extract_string_field(req_str, "text").unwrap_or_default())
+                )
+            } else if action == "press" {
+                format!(
+                    "{{\"key\":\"{}\"}}",
+                    escape_json(&extract_string_field(req_str, "key").unwrap_or_default())
+                )
+            } else if action == "scroll" {
+                format!(
+                    "{{\"x\":{},\"y\":{}}}",
+                    extract_number_field(req_str, "x").unwrap_or(0),
+                    extract_number_field(req_str, "y").unwrap_or(0)
+                )
+            } else {
+                String::new()
+            };
+
+            match browser.call(&id_str, cgroup_opt.as_deref(), action, Some(&body)) {
+                Ok(response) => {
+                    if action == "screenshot" {
+                        // Screenshots are returned as raw bytes on the framed
+                        // socket so the client gets frames, not base64.
+                        if let Some(b64) = extract_string_field(&response.json, "screenshot_b64") {
+                            let bytes = base64_decode(&b64);
+                            let json = format!(
+                                "{{\"ok\":true,\"len\":{},\"format\":\"png\",\"frame_id\":{}}}",
+                                bytes.len(),
+                                sand_protocol::now_ms()
+                            );
+                            return json;
+                        }
+                    }
+                    response.json
+                }
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        // ----- Remote computer use -----
+        "ComputerScreenshot" | "ComputerClick" | "ComputerType" | "ComputerMove" | "ComputerKey" | "ComputerScroll" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let computer = mgr.computer_manager();
+            let action = match method.as_str() {
+                "ComputerClick" => "click",
+                "ComputerType" => "type",
+                "ComputerMove" => "move",
+                "ComputerKey" => "key",
+                "ComputerScroll" => "scroll",
+                _ => "screenshot",
+            };
+            let params = crate::computer::Params::new(req_str);
+            match computer.dispatch(&id_str, action, &params) {
+                Ok(json) => json,
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        // ----- Runtime filesystem API (workspace confined) -----
+        // The agent's file.* tools land here on every machine, local or
+        // remote; there is no second filesystem implementation.
+        "FsRead" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let path = extract_string_field(req_str, "path").unwrap_or_default();
+            let root = match runtime_workspace(mgr, &id_str) {
+                Some(ws) => ws,
+                None => return format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json("runtime not found")),
+            };
+            match crate::fs::read(&root, &path) {
+                Ok(data) => {
+                    let b64 = base64_encode(&data);
+                    format!("{{\"ok\":true,\"len\":{},\"data_b64\":\"{}\"}}", data.len(), b64)
+                }
+                Err(e) => format!("{{\"ok\":false,\"security\":{},\"error\":\"{}\"}}", e.security, escape_json(&e.message)),
+            }
+        }
+        "FsWrite" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let path = extract_string_field(req_str, "path").unwrap_or_default();
+            let data = match extract_string_field(req_str, "data_b64") {
+                Some(b64) => base64_decode(&b64),
+                None => Vec::new(),
+            };
+            let root = match runtime_workspace(mgr, &id_str) {
+                Some(ws) => ws,
+                None => return format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json("runtime not found")),
+            };
+            match crate::fs::write(&root, &path, &data) {
+                Ok(len) => format!("{{\"ok\":true,\"bytes_written\":{}}}", len),
+                Err(e) => format!("{{\"ok\":false,\"security\":{},\"error\":\"{}\"}}", e.security, escape_json(&e.message)),
+            }
+        }
+        "FsList" | "FsStat" | "FsSearch" | "FsGlob" | "FsMkdir" | "FsRemove" | "FsRename" | "FsPatch" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let path = extract_string_field(req_str, "path").unwrap_or_default();
+            let root = match runtime_workspace(mgr, &id_str) {
+                Some(ws) => ws,
+                None => return format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json("runtime not found")),
+            };
+            let result = match method.as_str() {
+                "FsList" => crate::fs::list(&root, &path).map(|data| format!("{{\"ok\":true,\"data\":{}}}", data)),
+                "FsStat" => crate::fs::stat(&root, &path).map(|data| format!("{{\"ok\":true,\"data\":{}}}", data)),
+                "FsSearch" => {
+                    let query = extract_string_field(req_str, "query").unwrap_or_default();
+                    let max = extract_number_field(req_str, "max_matches").unwrap_or(200) as usize;
+                    crate::fs::search(&root, &path, &query, max).map(|data| format!("{{\"ok\":true,\"data\":{}}}", data))
+                }
+                "FsGlob" => {
+                    let pattern = extract_string_field(req_str, "pattern").unwrap_or_else(|| "*".to_string());
+                    let max = extract_number_field(req_str, "max_matches").unwrap_or(500) as usize;
+                    crate::fs::glob(&root, &path, &pattern, max).map(|data| format!("{{\"ok\":true,\"data\":{}}}", data))
+                }
+                "FsMkdir" => {
+                    let recursive = !req_str.contains("\"recursive\":false");
+                    crate::fs::mkdir(&root, &path, recursive).map(|_| "{\"ok\":true}".to_string())
+                }
+                "FsRemove" => {
+                    let recursive = req_str.contains("\"recursive\":true");
+                    crate::fs::remove(&root, &path, recursive).map(|_| "{\"ok\":true}".to_string())
+                }
+                "FsRename" => {
+                    let to = extract_string_field(req_str, "to").unwrap_or_default();
+                    crate::fs::rename(&root, &path, &to).map(|_| "{\"ok\":true}".to_string())
+                }
+                "FsPatch" => {
+                    // `patch` is text (unified diff); `patch_b64` is the escape
+                    // hatch for byte-exact content.
+                    let patch = extract_string_field(req_str, "patch").or_else(|| {
+                        extract_string_field(req_str, "patch_b64")
+                            .map(|b64| String::from_utf8_lossy(&base64_decode(&b64)).to_string())
+                    });
+                    let search = extract_string_field(req_str, "search");
+                    let replace = extract_string_field(req_str, "replace");
+                    let patch_ref = patch.as_deref();
+                    let search_ref = search.as_deref();
+                    let replace_ref = replace.as_deref();
+                    crate::fs::apply_patch(&root, &path, patch_ref, search_ref, replace_ref)
+                        .map(|updated| format!("{{\"ok\":true,\"bytes\":{}}}", updated.len()))
+                }
+                _ => unreachable!(),
+            };
+            match result {
+                Ok(json) => json,
+                Err(e) => format!("{{\"ok\":false,\"security\":{},\"error\":\"{}\"}}", e.security, escape_json(&e.message)),
+            }
+        }
         _ => {
             format!("{{\"ok\":false,\"error\":\"unknown method {}\"}}", escape_json(&method))
         }
     }
 }
 
+/// Workspace root of a runtime, used to confine filesystem operations.
+/// Public field extractor for sibling modules (browser worker parsing).
+pub fn extract_field_public(s: &str, field: &str) -> Option<String> {
+    crate::json::get_str(s, field)
+}
+
+/// Public base64 decoder for sibling modules.
+pub fn base64_decode_public(s: &str) -> Vec<u8> {
+    base64_decode(s)
+}
+
+fn runtime_workspace(mgr: &RuntimeManager, runtime_id: &str) -> Option<PathBuf> {
+    let id = RuntimeId::from_string(runtime_id.to_string());
+    mgr.get_runtime(&id).map(|rt| rt.workspace)
+}
+
 fn extract_string_field(s: &str, field: &str) -> Option<String> {
+    crate::json::get_str(s, field)
+}
+
+#[allow(dead_code)]
+fn extract_string_field_legacy(s: &str, field: &str) -> Option<String> {
     // look for "field":"value" or "field": "value"
     let patterns = [format!("\"{}\":\"", field), format!("\"{}\" : \"", field), format!("\"{}\": \"", field)];
     for pat in &patterns {
@@ -520,6 +788,11 @@ fn extract_string_field(s: &str, field: &str) -> Option<String> {
 }
 
 fn extract_number_field(s: &str, field: &str) -> Option<u64> {
+    crate::json::get_u64(s, field)
+}
+
+#[allow(dead_code)]
+fn extract_number_field_legacy(s: &str, field: &str) -> Option<u64> {
     let pat = format!("\"{}\":", field);
     if let Some(start) = s.find(&pat) {
         let rest = &s[start + pat.len()..].trim_start();
@@ -532,7 +805,7 @@ fn extract_number_field(s: &str, field: &str) -> Option<u64> {
 }
 
 fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    crate::json::escape(s)
 }
 
 fn base64_encode(data: &[u8]) -> String {

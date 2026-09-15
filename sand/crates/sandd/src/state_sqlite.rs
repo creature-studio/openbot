@@ -65,7 +65,8 @@ impl SqliteState {
                 started_at INTEGER,
                 capabilities TEXT,
                 procs INTEGER DEFAULT 0,
-                ptys INTEGER DEFAULT 0
+                ptys INTEGER DEFAULT 0,
+                machine_id TEXT
             );
             CREATE TABLE IF NOT EXISTS process (
                 id TEXT PRIMARY KEY,
@@ -218,9 +219,19 @@ impl SqliteState {
         Ok(())
     }
 
-    pub fn save_runtime(&self, id: &str, kind: &str, state: &str, workspace: &str, cgroup_path: Option<&str>, created_at: u64, started_at: Option<u64>, capabilities: &str, procs: usize, ptys: usize) -> Result<(), String> {
+    /// Add a column to an existing table when it is missing (SQLite has no
+    /// `ADD COLUMN IF NOT EXISTS`, so the error is simply ignored).
+    pub fn ensure_column(&self, table: &str, column: &str, decl: &str) -> Result<(), String> {
+        self.exec(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {};",
+            table, column, decl
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_runtime(&self, id: &str, kind: &str, state: &str, workspace: &str, cgroup_path: Option<&str>, created_at: u64, started_at: Option<u64>, capabilities: &str, procs: usize, ptys: usize, machine_id: &str) -> Result<(), String> {
         let sql = format!(
-            "INSERT OR REPLACE INTO runtime (id, kind, state, workspace, cgroup_path, created_at, started_at, capabilities, procs, ptys) VALUES ('{}', '{}', '{}', '{}', {}, {}, {}, '{}', {}, {});",
+            "INSERT OR REPLACE INTO runtime (id, kind, state, workspace, cgroup_path, created_at, started_at, capabilities, procs, ptys, machine_id) VALUES ('{}', '{}', '{}', '{}', {}, {}, {}, '{}', {}, {}, '{}');",
             escape_sql(id),
             escape_sql(kind),
             escape_sql(state),
@@ -230,14 +241,15 @@ impl SqliteState {
             started_at.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
             escape_sql(capabilities),
             procs,
-            ptys
+            ptys,
+            escape_sql(machine_id)
         );
         self.exec(&sql)
     }
 
     pub fn load_runtimes(&self) -> Result<Vec<RuntimeRow>, String> {
         let mut rows = Vec::new();
-        self.exec_with_callback("SELECT id, kind, state, workspace, cgroup_path, created_at, started_at, capabilities, procs, ptys FROM runtime;", |row| {
+        self.exec_with_callback("SELECT id, kind, state, workspace, cgroup_path, created_at, started_at, capabilities, procs, ptys, machine_id FROM runtime;", |row| {
             let mut map = std::collections::HashMap::new();
             for (k, v) in row {
                 map.insert(k, v);
@@ -253,6 +265,7 @@ impl SqliteState {
                 capabilities: map.get("capabilities").cloned().unwrap_or_default(),
                 procs: map.get("procs").and_then(|s| s.parse().ok()).unwrap_or(0),
                 ptys: map.get("ptys").and_then(|s| s.parse().ok()).unwrap_or(0),
+                machine_id: map.get("machine_id").cloned().filter(|s| !s.is_empty()),
             };
             rows.push(r);
             true
@@ -335,6 +348,8 @@ pub struct RuntimeRow {
     pub capabilities: String,
     pub procs: usize,
     pub ptys: usize,
+    /// Machine this runtime lives on (host fingerprint id), when known.
+    pub machine_id: Option<String>,
 }
 
 fn escape_sql(s: &str) -> String {

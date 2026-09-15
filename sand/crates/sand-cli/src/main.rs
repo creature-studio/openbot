@@ -1,3 +1,5 @@
+use sand_bridge as bridge;
+
 use std::path::PathBuf;
 use sand_client::SandClient;
 
@@ -163,6 +165,23 @@ fn main() {
                 }
             }
         }
+        // SSH stdio ⇄ sandd UDS tunnel. Runs over the SSH connection that the
+        // host-agent establishes; never opens a network port.
+        "bridge" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let options = match bridge::options_from_args(args) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    eprintln!("usage: sand bridge [--socket <sandd.sock>] [-v]");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(e) = bridge::run(options) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
         "logs" => {
             eprintln!("logs not yet implemented, use runtime inspect");
         }
@@ -188,6 +207,7 @@ fn print_help() {
     println!("  sand pty open <runtime_id> <pty_id>");
     println!("  sand pty close <runtime_id> <pty_id>");
     println!("  sand pty resize <runtime_id> <pty_id> <cols> <rows>");
+    println!("  sand bridge [--socket <sandd.sock>] [-v]   (SSH stdio ⇄ sandd UDS)");
 }
 
 fn extract_field(s: &str, field: &str) -> Option<String> {

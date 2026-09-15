@@ -20,6 +20,37 @@ extern "C" {
     fn sqlite3_free(ptr: *mut c_void);
 }
 
+/// Row collector used by `sqlite3_exec`'s callback.
+#[derive(Default)]
+struct Rows {
+    rows: Vec<Vec<Option<String>>>,
+}
+
+/// `extern "C"` callback: collect one row per call.
+extern "C" fn collect_row(
+    ctx: *mut c_void,
+    argc: c_int,
+    argv: *mut *mut c_char,
+    _col_names: *mut *mut c_char,
+) -> c_int {
+    if ctx.is_null() {
+        return 0;
+    }
+    let rows = unsafe { &mut *(ctx as *mut Rows) };
+    let mut row = Vec::with_capacity(argc as usize);
+    for index in 0..argc {
+        let value_ptr = unsafe { *argv.offset(index as isize) };
+        if value_ptr.is_null() {
+            row.push(None);
+        } else {
+            let value = unsafe { CStr::from_ptr(value_ptr) };
+            row.push(Some(value.to_string_lossy().to_string()));
+        }
+    }
+    rows.rows.push(row);
+    0
+}
+
 pub struct SqlitePersistence {
     db: Arc<Mutex<*mut sqlite3>>,
     path: PathBuf,
@@ -65,6 +96,16 @@ impl SqlitePersistence {
                 result TEXT,
                 created_at INTEGER,
                 updated_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS machines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                user TEXT,
+                ssh_config_host TEXT,
+                display_name TEXT,
+                created_at INTEGER
             );
             CREATE TABLE IF NOT EXISTS event (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +184,132 @@ impl SqlitePersistence {
             now
         );
         self.exec(&sql)
+    }
+
+    /// Run a query and collect every row (`sqlite3_exec` + callback).
+    fn query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let db_ptr = *self.db.lock().unwrap();
+        if db_ptr.is_null() {
+            return Err("sqlite database is closed".to_string());
+        }
+        let c_sql = CString::new(sql).map_err(|e| e.to_string())?;
+        let mut rows = Rows::default();
+        let mut errmsg: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            sqlite3_exec(
+                db_ptr,
+                c_sql.as_ptr(),
+                Some(collect_row),
+                &mut rows as *mut Rows as *mut c_void,
+                &mut errmsg as *mut *mut c_char,
+            )
+        };
+        if rc != 0 {
+            let message = if !errmsg.is_null() {
+                let text = unsafe { CStr::from_ptr(errmsg) }
+                    .to_string_lossy()
+                    .to_string();
+                unsafe { sqlite3_free(errmsg as *mut c_void) };
+                text
+            } else {
+                format!("sqlite query failed rc={rc}")
+            };
+            return Err(message);
+        }
+        Ok(rows.rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Machines
+    // -----------------------------------------------------------------------
+
+    /// Persist a machine record.
+    ///
+    /// Only connection *coordinates* are stored — id, name, host, port, user and
+    /// the `~/.ssh/config` alias. There is no column for a password, a
+    /// passphrase or a private key, and the schema is the enforcement
+    /// (architecture §九).
+    pub fn save_machine(&self, machine: &spark_model::Machine) -> Result<(), String> {
+        let (host, port, user, alias) = match &machine.kind {
+            spark_model::MachineKind::Ssh {
+                host,
+                port,
+                user,
+                ssh_config_host,
+            } => (
+                host.clone(),
+                *port,
+                user.clone(),
+                ssh_config_host.clone(),
+            ),
+            // The local machine is implicit; storing it would only create a
+            // record that can drift from the running host-agent.
+            spark_model::MachineKind::Local => return Ok(()),
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let sql = format!(
+            "INSERT OR REPLACE INTO machines (id, name, host, port, user, ssh_config_host, display_name, created_at) \
+             VALUES ('{}', '{}', '{}', {}, {}, {}, {}, {});",
+            escape_sql(machine.id.as_str()),
+            escape_sql(&machine.name),
+            escape_sql(&host),
+            port,
+            user.map(|u| format!("'{}'", escape_sql(&u)))
+                .unwrap_or_else(|| "NULL".to_string()),
+            alias
+                .map(|a| format!("'{}'", escape_sql(&a)))
+                .unwrap_or_else(|| "NULL".to_string()),
+            machine
+                .display_name
+                .as_ref()
+                .map(|d| format!("'{}'", escape_sql(d)))
+                .unwrap_or_else(|| "NULL".to_string()),
+            now
+        );
+        self.exec(&sql)
+    }
+
+    /// Every saved machine, ready to register with MachineManager.
+    pub fn load_machines(&self) -> Result<Vec<spark_model::Machine>, String> {
+        let rows = self.query(
+            "SELECT id, name, host, port, user, ssh_config_host FROM machines ORDER BY created_at ASC;",
+        )?;
+        let mut machines = Vec::new();
+        for row in rows {
+            if row.len() < 6 {
+                continue;
+            }
+            let id = row[0].clone().unwrap_or_default();
+            let name = row[1].clone().unwrap_or_default();
+            let host = row[2].clone().unwrap_or_default();
+            let port = row[3]
+                .clone()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(22);
+            let user = row[4].clone();
+            let alias = row[5].clone();
+            machines.push(spark_model::Machine::ssh(
+                spark_model::MachineId::from_string(id),
+                name,
+                host,
+                port,
+                user.filter(|u| !u.is_empty()),
+                alias.filter(|a| !a.is_empty()),
+            ));
+        }
+        Ok(machines)
+    }
+
+    pub fn delete_machine(&self, machine_id: &str) -> Result<(), String> {
+        self.exec(&format!(
+            "DELETE FROM machines WHERE id = '{}';",
+            escape_sql(machine_id)
+        ))
     }
 }
 

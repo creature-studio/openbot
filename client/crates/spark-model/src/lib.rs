@@ -13,7 +13,7 @@ pub mod settings;
 pub mod machine;
 
 pub use bot::{BotId, Bot};
-pub use task::{TaskId, TaskStatus, TaskSummary, TaskDetail};
+pub use task::{TaskId, TaskStatus, TaskSummary, TaskDetail, Artifact};
 pub use workbench::Workbench;
 pub use timeline::{
     TimelineItem, UserMessage, AssistantMessage, StatusItem, ToolItem,
@@ -25,5 +25,6 @@ pub use connection::{ConnectionStatus, ServerInfo};
 pub use settings::Settings;
 pub use machine::{
     Machine, MachineId, MachineKind, MachineStatus, MachineCapabilities,
-    MachineMetadata, MachineConnection, SshHostKey,
+    MachineMetadata, MachineConnection, SshHostKey, SparkPaths,
+    LOCAL_MACHINE_ID, fingerprint_machine_id, machine_ids_match,
 };

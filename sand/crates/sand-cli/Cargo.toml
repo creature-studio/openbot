@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 sand-protocol = { path = "../sand-protocol" }
 sand-client = { path = "../sand-client" }
+sand-bridge = { path = "../sand-bridge" }

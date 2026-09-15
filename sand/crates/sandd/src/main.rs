@@ -8,7 +8,12 @@ mod events;
 mod cgroup;
 mod rpc;
 mod rpc_binary;
+mod browser;
+mod capabilities;
+mod computer;
 mod desktop;
+mod fs;
+mod json;
 mod supervisor;
 
 use std::collections::HashMap;
@@ -27,15 +32,55 @@ use rpc_binary::BinaryRpcServer;
 use supervisor::Supervisor;
 
 fn main() {
-    // setup tracing via eprintln
-    eprintln!("[sandd] starting at {}", now_ms());
+    // `sandd bridge --socket <path>`: run the SSH stdio ⇄ UDS tunnel instead of
+    // the daemon. Used by host-agent's remote bootstrap when a machine has no
+    // `sand` CLI installed yet (single self-contained binary upload).
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.len() > 1 && argv[1] == "bridge" {
+        let options = match sand_bridge::options_from_args(argv[2..].to_vec()) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                eprintln!("usage: sandd bridge [--socket <sandd.sock>] [-v]");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = sand_bridge::run(options) {
+            eprintln!("[sandd bridge] error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+    if argv.len() > 1 && (argv[1] == "--version" || argv[1] == "-V") {
+        println!("sandd {}", sand_protocol::SANDB_VERSION);
+        return;
+    }
 
-    // ensure /run/sand exists, fallback to /tmp/sandd
-    let base_dir = if Path::new("/run/sand").exists() || std::fs::create_dir_all("/run/sand").is_ok() {
-        PathBuf::from("/run/sand")
-    } else {
-        let _ = std::fs::create_dir_all("/tmp/sandd");
-        PathBuf::from("/tmp/sandd")
+    // setup tracing via eprintln
+    eprintln!("[sandd] starting {} at {}", sand_protocol::SANDB_VERSION, now_ms());
+
+    // Socket directory. `--socket-dir` (or $SAND_SOCKET_DIR) is how the remote
+    // bootstrap points sandd at ~/.cache/spark/run without needing root; the
+    // /run/sand → /tmp/sandd fallback keeps existing single-machine setups
+    // working unchanged.
+    let flags = parse_flags(&argv);
+    let base_dir = match flags.socket_dir {
+        Some(dir) => {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!("[sandd] cannot create socket dir {}: {}", dir.display(), e);
+                std::process::exit(1);
+            }
+            restrict_permissions(&dir);
+            dir
+        }
+        None => {
+            if Path::new("/run/sand").exists() || std::fs::create_dir_all("/run/sand").is_ok() {
+                PathBuf::from("/run/sand")
+            } else {
+                let _ = std::fs::create_dir_all("/tmp/sandd");
+                PathBuf::from("/tmp/sandd")
+            }
+        }
     };
     let sock_path = base_dir.join("sandd.sock");
     let binary_sock_path = base_dir.join("sandd-binary.sock");
@@ -45,13 +90,19 @@ fn main() {
     let _ = std::fs::remove_file(&binary_sock_path);
 
     // init managers
-    let state_path = if Path::new("/run/sand").exists() {
-        PathBuf::from("/run/sand/state.json")
-    } else {
-        PathBuf::from("/tmp/sandd/state.json")
+    let state_path = match flags.data_dir {
+        Some(dir) => {
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("state.json")
+        }
+        None => base_dir.join("state.json"),
     };
 
     let state_mgr = Arc::new(StateManager::new(state_path));
+    // Bring pre-existing databases up to the current schema (runtime.machine_id).
+    if let Err(e) = state_mgr.ensure_schema() {
+        eprintln!("[sandd] schema migration failed: {:?}", e);
+    }
     let cgroup_mgr = Arc::new(CgroupManager::new());
     let event_bus = Arc::new(EventBus::new());
     let runtime_mgr = Arc::new(RuntimeManager::new(state_mgr.clone(), cgroup_mgr.clone(), event_bus.clone()));
@@ -79,6 +130,16 @@ fn main() {
     // start RPC server (blocking)
     let rpc_server = RpcServer::new(sock_path.clone(), runtime_mgr.clone());
 
+    let info = sand_protocol::status::machine_info();
+    eprintln!(
+        "[sandd] machine {} ({}, {}, {} cores, uptime {}s) protocol v{}",
+        info.machine_id,
+        info.os,
+        info.hostname,
+        info.cpu_cores,
+        info.uptime_seconds,
+        sand_protocol::SAND_PROTOCOL_VERSION
+    );
     eprintln!("[sandd] listening on {} and binary {}", sock_path.display(), binary_sock_path.display());
 
     // handle signals for graceful shutdown? simple loop
@@ -90,3 +151,48 @@ fn main() {
 }
 
 // small helper for CLI testing without RPC: allow direct calls via env?
+
+/// Minimal flag parser for the daemon binary.
+struct Flags {
+    socket_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+}
+
+fn parse_flags(argv: &[String]) -> Flags {
+    let mut flags = Flags {
+        socket_dir: std::env::var("SAND_SOCKET_DIR").ok().map(PathBuf::from),
+        data_dir: std::env::var("SAND_DATA_DIR").ok().map(PathBuf::from),
+    };
+    let mut iter = argv.iter().skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--socket-dir" | "--dir" => {
+                if let Some(value) = iter.next() {
+                    flags.socket_dir = Some(PathBuf::from(value));
+                }
+            }
+            "--data-dir" => {
+                if let Some(value) = iter.next() {
+                    flags.data_dir = Some(PathBuf::from(value));
+                }
+            }
+            other => {
+                if let Some(value) = other.strip_prefix("--socket-dir=") {
+                    flags.socket_dir = Some(PathBuf::from(value));
+                } else if let Some(value) = other.strip_prefix("--data-dir=") {
+                    flags.data_dir = Some(PathBuf::from(value));
+                }
+            }
+        }
+    }
+    flags
+}
+
+/// Sockets must not be world readable: sandd RPC can start processes.
+fn restrict_permissions(dir: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}

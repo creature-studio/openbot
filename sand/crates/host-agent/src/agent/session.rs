@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use spark_model::MachineId;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentSessionId(pub String);
 
@@ -17,6 +19,13 @@ impl AgentSessionId {
 pub struct AgentSession {
     pub id: String, // use String for simplicity, compatible with AgentSessionId
     pub runtime_id: String,
+    /// Machine the session's runtime lives on (architecture §十九).
+    ///
+    /// Fixed when the session is created: there is no machine handoff in v1, so
+    /// every tool call of this session routes through this machine — local or
+    /// SSH, the tool layer cannot tell. A session that predates the machine
+    /// registry defaults to the local machine.
+    pub machine_id: MachineId,
     pub model: String,
     pub messages: Vec<Message>,
     pub tool_state: HashMap<String, String>,
@@ -78,6 +87,7 @@ impl AgentSession {
         Self {
             id: AgentSessionId::new().0,
             runtime_id,
+            machine_id: MachineId::local(),
             model,
             messages: Vec::new(),
             tool_state: HashMap::new(),
@@ -88,6 +98,18 @@ impl AgentSession {
             updated_at: now,
             goal: None,
         }
+    }
+
+    /// Create a session whose runtime lives on `machine_id`.
+    pub fn on_machine(machine_id: MachineId, runtime_id: String, model: String) -> Self {
+        let mut session = Self::new(runtime_id, model);
+        session.machine_id = machine_id;
+        session
+    }
+
+    /// Which machine the runtime lives on — what the tool context resolves.
+    pub fn machine_id(&self) -> &MachineId {
+        &self.machine_id
     }
 
     pub fn with_goal(mut self, goal: String) -> Self {
@@ -127,6 +149,7 @@ impl AgentSession {
         Self {
             id: AgentSessionId::new().0,
             runtime_id: self.runtime_id.clone(), // same runtime, new session
+            machine_id: self.machine_id.clone(), // handoff never moves machines (v1)
             model: new_model.unwrap_or_else(|| self.model.clone()),
             messages: vec![], // fresh messages, but could copy context
             tool_state: self.tool_state.clone(),

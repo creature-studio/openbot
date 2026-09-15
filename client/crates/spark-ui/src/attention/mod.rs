@@ -33,23 +33,59 @@
 
 use gpui::{
     div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
-    WindowContext,
 };
-use crate::stores::{AttentionStore, AttentionSnapshot};
+use crate::machine::MachinePanel;
+use crate::stores::{AttentionStore, AttentionSnapshot, MachineStore};
 
 pub struct AttentionOverlay {
     attention: Entity<AttentionStore>,
+    /// Machine-level attention (unknown / changed host key, auth failure).
+    /// It takes precedence: a machine that is not trusted cannot run anything,
+    /// so the user must answer this card first.
+    machines: Option<Entity<MachineStore>>,
 }
 
 impl AttentionOverlay {
-    pub fn new(attention: Entity<AttentionStore>, cx: &mut WindowContext) -> Self {
+    pub fn new(attention: Entity<AttentionStore>, cx: &mut ViewContext<Self>) -> Self {
         cx.observe(&attention, |_, _, cx| cx.notify()).detach();
-        Self { attention }
+        Self {
+            attention,
+            machines: None,
+        }
+    }
+
+    /// Overlay that also shows the machine host-key confirmation card.
+    pub fn with_machines(
+        attention: Entity<AttentionStore>,
+        machines: Entity<MachineStore>,
+        cx: &mut ViewContext<Self>,
+    ) -> Self {
+        cx.observe(&machines, |_, _, cx| cx.notify()).detach();
+        let mut overlay = Self::new(attention, cx);
+        overlay.machines = Some(machines);
+        overlay
     }
 }
 
 impl Render for AttentionOverlay {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        // Machine attention first: [取消] / [信任并连接] is a prerequisite for
+        // every task on that machine.
+        let machine_attention = self
+            .machines
+            .as_ref()
+            .and_then(|machines| machines.read(cx).attention.clone());
+        if let Some(attention) = machine_attention {
+            return div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(0x00000080))
+                .child(MachinePanel::render_host_key_attention(attention));
+        }
+
         let attention = self.attention.read(cx);
 
         match &attention.active {
