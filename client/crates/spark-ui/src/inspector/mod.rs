@@ -54,6 +54,7 @@ impl Inspector {
         }
     }
 
+    #[allow(dead_code)] // called by tab click handlers (not yet wired)
     fn set_tab(&mut self, tab: InspectorTab, cx: &mut Context<Self>) {
         self.active_tab = tab;
         cx.notify();

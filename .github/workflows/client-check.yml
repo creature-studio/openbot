@@ -69,6 +69,14 @@ jobs:
             echo "::warning::[w] $safe"
           done
 
+      - name: Report warnings 5-8
+        if: always()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^warning(:| )" | sed -n '9,16p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::warning::[w2] $safe"
+          done
+
       - name: Report tail part 1/3
         if: failure()
         run: |

@@ -21,6 +21,7 @@ use crate::ConnectionStore;
 
 pub struct Composer {
     tasks: Entity<TaskStore>,
+    #[allow(dead_code)] // read when the send path checks connection state
     connection: Entity<ConnectionStore>,
     input_text: String,
     is_focused: bool,
