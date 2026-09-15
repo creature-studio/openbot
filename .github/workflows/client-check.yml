@@ -40,28 +40,38 @@ jobs:
 
       # The sandbox running this agent cannot download Actions logs, so mirror
       # the failure output into check annotations (readable via the API).
-      - name: Report failure lines 1-9
+      # Cargo prints errors last, so report the tail: covers short resolution
+      # logs whole and the error region of long compile logs.
+      - name: Report error summary
         if: failure()
         run: |
           n=$(wc -l < /tmp/check.log)
-          echo "::error::cargo check failed, check.log has $n lines."
-          sed -n '1,9p' /tmp/check.log | while IFS= read -r line; do
-            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[$n] $safe"
+          echo "::error::cargo check failed, check.log has $n lines. Errors:"
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -E "^error(\[|:)|^ *--> " | head -9 | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[err] $safe"
           done
 
-      - name: Report failure lines 10-18
+      - name: Report tail part 1/3
         if: failure()
         run: |
-          sed -n '10,18p' /tmp/check.log | while IFS= read -r line; do
+          tail -27 /tmp/check.log | sed -n '1,9p' | while IFS= read -r line; do
             safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[mid] $safe"
+            echo "::error::[t1] $safe"
           done
 
-      - name: Report failure lines 19-27
+      - name: Report tail part 2/3
         if: failure()
         run: |
-          sed -n '19,27p' /tmp/check.log | while IFS= read -r line; do
+          tail -27 /tmp/check.log | sed -n '10,18p' | while IFS= read -r line; do
             safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[19+] $safe"
+            echo "::error::[t2] $safe"
+          done
+
+      - name: Report tail part 3/3
+        if: failure()
+        run: |
+          tail -27 /tmp/check.log | sed -n '19,27p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[t3] $safe"
           done
