@@ -14,10 +14,15 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-# GPUI — pin to a known commit or crates.io release
-# Current crates.io version: 0.2.2 (https://docs.rs/crate/gpui/latest)
-# For real builds, use: gpui = { git = "https://github.com/zed-industries/zed.git", rev = "..." }
-gpui = "0.2.2"
+# GPUI — date-tagged mirror of Zed's GPUI crates (lighter than cloning all of
+# github.com/zed-industries/zed; see https://github.com/realab/gpui-standalone).
+# Tag 2026-09-14 == Zed main @ ba7da93e5ccc2b630077b2ae26c7581f3c21f984.
+# Cargo pins the resolved mirror commit in Cargo.lock; bump the tag to update.
+# NOTE: third-party mirror — audit before trusting new tags in releases.
+gpui = { git = "https://github.com/realab/gpui-standalone.git", tag = "2026-09-14" }
+# Platform backends (windowing + text). ["font-kit", "wayland", "x11"] is the
+# safe cross-platform default per crates/gpui/README.md in the mirror.
+gpui_platform = { git = "https://github.com/realab/gpui-standalone.git", tag = "2026-09-14", features = ["font-kit", "wayland", "x11"] }
 
 # Model / Transport
 serde = { version = "1", features = ["derive"] }

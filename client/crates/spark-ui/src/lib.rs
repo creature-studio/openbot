@@ -58,7 +58,7 @@ pub use stores::machine::{MachineAttention, MachineForm};
 /// sidebar's machine status, the Runtime tab and the host-key card all update
 /// from the same stream the task timeline uses.
 pub fn run_app() {
-    gpui::Application::new().run(|cx: &mut gpui::App| {
+    gpui_platform::application().run(|cx: &mut gpui::App| {
         let state = AppState::new("host-agent", cx);
 
         // Commands the UI produced travel over the host-agent link. A plain OS
