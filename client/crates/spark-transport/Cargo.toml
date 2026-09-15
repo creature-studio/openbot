@@ -1,0 +1,19 @@
+[package]
+name = "spark-transport"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+spark-model = { path = "../spark-model" }
+sand-protocol = { path = "../../sand/crates/sand-protocol" }
+sand-client = { path = "../../sand/crates/sand-client" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+base64 = "0.22"
+chrono = { workspace = true }
+async-trait = "0.1"

@@ -1,0 +1,11 @@
+[package]
+name = "spark-terminal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+spark-model = { path = "../spark-model" }
+alacritty_terminal = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }

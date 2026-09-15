@@ -7,4 +7,7 @@ members = [
     "crates/sand-init",
     "crates/host-agent",
 ]
+exclude = [
+    "../client",
+]
 resolver = "2"

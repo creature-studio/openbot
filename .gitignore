@@ -3,3 +3,6 @@
 sand-runtime-dump/
 sand/browser-worker/node_modules/
 sand/browser-worker/package-lock.json
+**/*.swp
+**/*.swo
+**/.*.kate-swp

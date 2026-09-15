@@ -1,4 +1,4 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 use std::path::{Path, PathBuf};
 
 pub struct FsReadTool;
@@ -175,8 +175,32 @@ impl Tool for FsReadTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         if !runtime_id.is_empty() {
+            // Try transport routing for remote filesystems
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Read { path: PathBuf::from(&path) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("file: {} (via transport)\ncontent:\n{}", path, content));
+                            r.tool_name = "file.read".to_string();
+                            return Ok(r);
+                        }
+                        Ok(FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("read failed via transport: {}", message), Some("READ_FAILED".to_string()));
+                            r.tool_name = "file.read".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             match read_file_via_workspace_secure(runtime_id, &path) {
                 Ok(content) => {
                     let mut r = ToolResult::success(format!("file: {} (via secure workspace {})\ncontent:\n{}", path, runtime_id, content));
@@ -219,9 +243,31 @@ impl Tool for FsWriteTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         let content = extract_arg(args, "content").ok_or("missing content")?;
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Write { path: PathBuf::from(&path), data: content.as_bytes().to_vec() };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(FsResponse::Ok { data: _ }) => {
+                            let mut r = ToolResult::success(format!("wrote {} via transport in {}", path, runtime_id));
+                            r.tool_name = "file.write".to_string();
+                            return Ok(r);
+                        }
+                        Ok(FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("write failed via transport: {}", message), Some("WRITE_FAILED".to_string()));
+                            r.tool_name = "file.write".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             match write_file_via_workspace_secure(runtime_id, &path, &content) {
                 Ok(()) => {
                     let mut r = ToolResult::success(format!("wrote {} via secure workspace {}", path, runtime_id));
@@ -265,8 +311,31 @@ impl Tool for FsListTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::List { path: PathBuf::from(&path) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let list = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("listing {} via transport:\n{}", path, list));
+                            r.tool_name = "file.list".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("list failed via transport: {}", message), Some("LIST_FAILED".to_string()));
+                            r.tool_name = "file.list".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             match list_via_workspace_secure(runtime_id, &path) {
                 Ok(list) => {
                     let mut r = ToolResult::success(format!("listing {} via secure workspace {}:\n{}", path, runtime_id, list));
@@ -316,9 +385,33 @@ impl Tool for FsSearchTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let pattern = extract_arg(args, "pattern").ok_or("missing pattern")?;
         let path = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
         if !runtime_id.is_empty() {
+            // Try transport routing for remote filesystems
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Search { path: PathBuf::from(&path), query: pattern.clone() };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("search '{}' in {} via transport:\n{}", pattern, path, content));
+                            r.tool_name = "file.search".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("search failed via transport: {}", message), Some("SEARCH_FAILED".to_string()));
+                            r.tool_name = "file.search".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(ws) = get_runtime_workspace(runtime_id) {
                 if let Err(e) = resolve_secure_dir(&ws, &path) {
                     if e.contains("workspace escape") {
@@ -395,8 +488,31 @@ impl Tool for FsStatTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Stat { path: PathBuf::from(&path) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(content);
+                            r.tool_name = "file.stat".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("stat failed via transport: {}", message), Some("STAT_FAILED".to_string()));
+                            r.tool_name = "file.stat".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             match stat_via_workspace_secure(runtime_id, &path) {
                 Ok(content) => {
                     let mut r = ToolResult::success(content);
@@ -440,10 +556,57 @@ impl Tool for FsPatchTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         let patch = extract_arg(args, "patch");
         let search = extract_arg(args, "search");
         let replace = extract_arg(args, "replace");
+
+        // Try transport routing for remote filesystems (patch via transport)
+        if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    if let Some(patch_content) = patch {
+                        let req = spark_transport::FsRequest::Patch { path: PathBuf::from(&path), patch: patch_content.as_bytes().to_vec() };
+                        match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                            Ok(spark_transport::FsResponse::Ok { data }) => {
+                                let content = String::from_utf8_lossy(&data);
+                                let mut r = ToolResult::success(format!("patch applied to {} via transport:\n{}", path, content));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(spark_transport::FsResponse::Error { message }) => {
+                                let mut r = ToolResult::error(format!("patch failed via transport: {}", message), Some("PATCH_FAILED".to_string()));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                    if let (Some(s), Some(r)) = (search.clone(), replace.clone()) {
+                        let req = spark_transport::FsRequest::Patch { path: PathBuf::from(&path), patch: format!("--- a/{}\n+++ b/{}\n@@ -1 +1 @@\n-{}\n+{}", path, path, s, r).as_bytes().to_vec() };
+                        match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                            Ok(spark_transport::FsResponse::Ok { data }) => {
+                                let content = String::from_utf8_lossy(&data);
+                                let mut r = ToolResult::success(format!("patched {} via transport (search/replace):\n{}", path, content));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(spark_transport::FsResponse::Error { message }) => {
+                                let mut r = ToolResult::error(format!("patch (search/replace) failed via transport: {}", message), Some("PATCH_FAILED".to_string()));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+        }
 
         if let (Some(s), Some(r)) = (search, replace) {
             if !runtime_id.is_empty() {
@@ -504,6 +667,27 @@ impl Tool for FsPatchTool {
             }
         } else if let Some(patch_content) = patch {
             if !runtime_id.is_empty() {
+                // Try transport routing for remote filesystem patch
+                if let Some(ctx) = ctx {
+                    if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                        let req = spark_transport::FsRequest::Patch { path: PathBuf::from(&path), patch: patch_content.as_bytes().to_vec() };
+                        match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                            Ok(spark_transport::FsResponse::Ok { data }) => {
+                                let content = String::from_utf8_lossy(&data);
+                                let mut r = ToolResult::success(format!("patch applied to {} via transport:\n{}", path, content));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(spark_transport::FsResponse::Error { message }) => {
+                                let mut r = ToolResult::error(format!("patch failed via transport: {}", message), Some("PATCH_FAILED".to_string()));
+                                r.tool_name = "file.patch".to_string();
+                                return Ok(r);
+                            }
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                }
                 if let Some(ws) = get_runtime_workspace(runtime_id) {
                     if let Err(e) = resolve_secure_existing(&ws, &path) {
                         if let Err(e2) = resolve_secure_new(&ws, &path) {
@@ -609,8 +793,31 @@ impl Tool for FsMkdirTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Mkdir { path: PathBuf::from(&path) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("mkdir {} via transport:\n{}", path, content));
+                            r.tool_name = "file.mkdir".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("mkdir failed via transport: {}", message), Some("MKDIR_FAILED".to_string()));
+                            r.tool_name = "file.mkdir".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(ws) = get_runtime_workspace(runtime_id) {
                 match resolve_secure_new(&ws, &path) {
                     Ok(secure_path) => {
@@ -659,11 +866,34 @@ impl Tool for FsRemoveTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         if path == "/" || path == "/*" || path == "/etc" || path == "/usr" || path == "/bin" {
             return Ok(ToolResult::permission_required("file.remove".to_string(), format!("refusing to remove dangerous path '{}'", path)));
         }
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Remove { path: PathBuf::from(&path) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("removed {} via transport:\n{}", path, content));
+                            r.tool_name = "file.remove".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("remove failed via transport: {}", message), Some("REMOVE_FAILED".to_string()));
+                            r.tool_name = "file.remove".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(ws) = get_runtime_workspace(runtime_id) {
                 match resolve_secure_existing(&ws, &path) {
                     Ok(secure_path) => {
@@ -721,9 +951,32 @@ impl Tool for FsRenameTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let from = extract_arg(args, "from").or_else(|| extract_arg(args, "path")).or_else(|| extract_arg(args, "old")).ok_or("missing from")?;
         let to = extract_arg(args, "to").or_else(|| extract_arg(args, "new")).or_else(|| extract_arg(args, "dest")).ok_or("missing to")?;
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Rename { from: PathBuf::from(&from), to: PathBuf::from(&to) };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("renamed {} -> {} via transport:\n{}", from, to, content));
+                            r.tool_name = "file.rename".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("rename failed via transport: {}", message), Some("RENAME_FAILED".to_string()));
+                            r.tool_name = "file.rename".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(ws) = get_runtime_workspace(runtime_id) {
                 match (resolve_secure_existing(&ws, &from), resolve_secure_new(&ws, &to)) {
                     (Ok(secure_from), Ok(secure_to)) => {
@@ -785,9 +1038,32 @@ impl Tool for FsGlobTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let pattern = extract_arg(args, "pattern").ok_or("missing pattern")?;
         let base = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
         if !runtime_id.is_empty() {
+            if let Some(ctx) = ctx {
+                if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                    let req = spark_transport::FsRequest::Glob { pattern: pattern.clone() };
+                    match tokio::runtime::Handle::current().block_on(transport.fs_request(runtime_id, req)) {
+                        Ok(spark_transport::FsResponse::Ok { data }) => {
+                            let content = String::from_utf8_lossy(&data);
+                            let mut r = ToolResult::success(format!("glob '{}' via transport:\n{}", pattern, content));
+                            r.tool_name = "file.glob".to_string();
+                            return Ok(r);
+                        }
+                        Ok(spark_transport::FsResponse::Error { message }) => {
+                            let mut r = ToolResult::error(format!("glob failed via transport: {}", message), Some("GLOB_FAILED".to_string()));
+                            r.tool_name = "file.glob".to_string();
+                            return Ok(r);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+            }
             if let Some(ws) = get_runtime_workspace(runtime_id) {
                 match resolve_secure_dir(&ws, &base) {
                     Ok(secure_base) => {

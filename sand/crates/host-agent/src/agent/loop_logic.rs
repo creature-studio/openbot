@@ -1,7 +1,7 @@
 use super::session::{AgentSession, Message, Role};
 use super::state::{AgentStatus, Attention};
 use crate::model::{Model, ModelResponse};
-use crate::tools::{ToolRegistry, ToolResult, ToolStatus};
+use crate::tools::{ToolRegistry, ToolResult, ToolStatus, ToolExecutionContext};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH, Instant};
 
@@ -39,7 +39,7 @@ impl Budget {
             max_iterations,
             max_tokens: 100_000,
             max_tool_calls: 200,
-            max_elapsed_ms: 30 * 60 * 1000, // 30 min
+            max_elapsed_ms: 30 * 60 * 1000,
             tokens_used: 0,
             tool_calls: 0,
             started_at: Instant::now(),
@@ -79,7 +79,7 @@ impl AgentLoop {
             max_iterations: 50,
             enable_checkpoint: true,
             enable_recovery: true,
-            context_window: 20, // keep last 20 messages, summarize older
+            context_window: 20,
             budget: Budget::new(50),
         }
     }
@@ -100,19 +100,41 @@ impl AgentLoop {
         self
     }
 
-    // Core loop with streaming, cancellation, checkpoint, recovery, context, budget, attention, completion
+    // Core loop with sync tools + optional machine routing context
     pub fn run<F>(&self, session: &mut AgentSession, model: &dyn Model, tools: &ToolRegistry, mut event_cb: F) -> Result<String, String>
     where
         F: FnMut(LoopEvent),
     {
-        self.run_with_cancel(session, model, tools, Arc::new(AtomicBool::new(false)), &mut event_cb)
+        self.run_with_context(session, model, tools, None, &mut event_cb)
     }
 
-    pub fn run_with_cancel<F>(&self, session: &mut AgentSession, model: &dyn Model, tools: &ToolRegistry, cancel_flag: Arc<AtomicBool>, event_cb: &mut F) -> Result<String, String>
+    /// Run with optional ToolExecutionContext for machine routing (Phase 3).
+    pub fn run_with_context<F>(
+        &self,
+        session: &mut AgentSession,
+        model: &dyn Model,
+        tools: &ToolRegistry,
+        ctx: Option<&ToolExecutionContext>,
+        mut event_cb: F,
+    ) -> Result<String, String>
     where
         F: FnMut(LoopEvent),
     {
-        // Recovery: if session has checkpoint, resume from there
+        self.run_with_cancel(session, model, tools, ctx, Arc::new(AtomicBool::new(false)), &mut event_cb)
+    }
+
+    pub fn run_with_cancel<F>(
+        &self,
+        session: &mut AgentSession,
+        model: &dyn Model,
+        tools: &ToolRegistry,
+        ctx: Option<&ToolExecutionContext>,
+        cancel_flag: Arc<AtomicBool>,
+        mut event_cb: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(LoopEvent),
+    {
         let mut start_iteration = 0;
         if self.enable_recovery {
             if let Some(checkpoint_iter) = session.metadata.get("checkpoint_iteration").and_then(|s| s.parse::<usize>().ok()) {
@@ -127,14 +149,12 @@ impl AgentLoop {
         let mut budget = self.budget.clone();
 
         loop {
-            // Cancellation check
             if cancel_flag.load(Ordering::Relaxed) {
                 session.status = AgentStatus::Failed { reason: "cancelled".to_string() };
                 event_cb(LoopEvent::Cancelled);
                 return Err("cancelled".to_string());
             }
 
-            // Budget check
             if let Err(e) = budget.check(iterations) {
                 session.status = AgentStatus::Failed { reason: e.clone() };
                 event_cb(LoopEvent::Failed { reason: e.clone() });
@@ -148,21 +168,14 @@ impl AgentLoop {
             }
             iterations += 1;
 
-            // Context management: truncate old messages if too many
             let context_truncated = if session.messages.len() > self.context_window {
-                // Keep system + last N messages, summarize older? For MVP, just keep last N
-                let keep = self.context_window;
-                let total = session.messages.len();
-                // For simplicity, we don't actually truncate session.messages here, but we emit event
-                // In real implementation, we would summarize older messages via model
-                event_cb(LoopEvent::Context { messages: total, truncated: true });
+                event_cb(LoopEvent::Context { messages: session.messages.len(), truncated: true });
                 true
             } else {
                 event_cb(LoopEvent::Context { messages: session.messages.len(), truncated: false });
                 false
             };
 
-            // Model call with streaming simulation
             event_cb(LoopEvent::ModelCalled { iteration: iterations });
             event_cb(LoopEvent::Budget { tokens_used: budget.tokens_used, tool_calls: budget.tool_calls, elapsed_ms: budget.elapsed_ms() });
 
@@ -171,9 +184,7 @@ impl AgentLoop {
                 e
             })?;
 
-            // Streaming: emit content chunks
             if !response.content.is_empty() {
-                // Simulate streaming by chunking content
                 for chunk in response.content.chars().collect::<Vec<_>>().chunks(20) {
                     if cancel_flag.load(Ordering::Relaxed) {
                         session.status = AgentStatus::Failed { reason: "cancelled".to_string() };
@@ -185,9 +196,8 @@ impl AgentLoop {
                 }
             }
 
-            budget.tokens_used += response.content.len() / 4; // rough estimate
+            budget.tokens_used += response.content.len() / 4;
 
-            // If no tool calls, it's final answer -> completion
             if response.tool_calls.is_empty() {
                 let final_content = response.content.clone();
                 session.add_message(Message {
@@ -198,7 +208,6 @@ impl AgentLoop {
                     name: None,
                 });
                 session.status = AgentStatus::Completed;
-                // Checkpoint final
                 if self.enable_checkpoint {
                     session.metadata.insert("checkpoint_iteration".to_string(), iterations.to_string());
                     event_cb(LoopEvent::Checkpoint { session_id: session.id.clone(), iteration: iterations });
@@ -208,7 +217,6 @@ impl AgentLoop {
                 return Ok(final_content);
             }
 
-            // Add assistant message with tool calls
             session.add_message(Message {
                 role: Role::Assistant,
                 content: response.content.clone(),
@@ -219,13 +227,11 @@ impl AgentLoop {
 
             event_cb(LoopEvent::MessageAdded { role: "assistant".to_string(), content: response.content.clone() });
 
-            // Execute tool calls
             session.status = AgentStatus::WaitingTool;
             let mut should_freeze = false;
             let mut freeze_reason = String::new();
 
             for tc in &response.tool_calls {
-                // Cancellation check before each tool
                 if cancel_flag.load(Ordering::Relaxed) {
                     session.status = AgentStatus::Failed { reason: "cancelled".to_string() };
                     event_cb(LoopEvent::Cancelled);
@@ -237,7 +243,14 @@ impl AgentLoop {
                 event_cb(LoopEvent::ToolCallStarted { name: tc.name.clone(), args: tc.arguments.clone(), call_id: call_id.clone() });
 
                 let start = SystemTime::now();
-                let result = tools.execute(&tc.name, &tc.arguments, &session.runtime_id);
+
+                // Execute with context if available (Phase 3 machine routing)
+                let result = if let Some(ctx) = ctx {
+                    tools.execute_with_context(&tc.name, &tc.arguments, &session.runtime_id, Some(ctx))
+                } else {
+                    tools.execute(&tc.name, &tc.arguments, &session.runtime_id)
+                };
+
                 let duration_ms = start.elapsed().unwrap_or_default().as_millis() as u64;
 
                 let (result_str, status_str, is_permission, is_complete) = match &result {
@@ -251,7 +264,6 @@ impl AgentLoop {
                     Err(e) => (format!("error: {}", e), "error".to_string(), false, false),
                 };
 
-                // Attention handling
                 if is_permission {
                     let attention = Attention::PermissionRequired { tool: tc.name.clone(), reason: result_str.clone() };
                     event_cb(LoopEvent::Attention { attention: attention.clone() });
@@ -266,7 +278,6 @@ impl AgentLoop {
                     event_cb(LoopEvent::Attention { attention: Attention::ReadyForCheck });
                 }
 
-                // Add tool result message
                 session.add_message(Message {
                     role: Role::Tool,
                     content: result_str.clone(),
@@ -278,11 +289,9 @@ impl AgentLoop {
                 event_cb(LoopEvent::MessageAdded { role: "tool".to_string(), content: result_str.clone() });
                 event_cb(LoopEvent::ToolCallFinished { name: tc.name.clone(), result: result_str.clone(), call_id: call_id.clone(), status: status_str, duration_ms });
 
-                // Checkpoint after each tool
                 if self.enable_checkpoint {
                     session.metadata.insert("checkpoint_iteration".to_string(), iterations.to_string());
                     session.metadata.insert("last_tool".to_string(), tc.name.clone());
-                    // In real impl, persist session to disk/sqlite
                     event_cb(LoopEvent::Checkpoint { session_id: session.id.clone(), iteration: iterations });
                 }
             }
@@ -300,13 +309,5 @@ impl AgentLoop {
 
             session.status = AgentStatus::Running;
         }
-    }
-
-    // Streaming version that returns iterator of events
-    pub fn run_streaming<F>(&self, session: &mut AgentSession, model: &dyn Model, tools: &ToolRegistry, cancel_flag: Arc<AtomicBool>, mut event_cb: F) -> Result<String, String>
-    where
-        F: FnMut(LoopEvent),
-    {
-        self.run_with_cancel(session, model, tools, cancel_flag, &mut event_cb)
     }
 }

@@ -116,6 +116,16 @@ fn serde_json_escape(s: &str) -> String {
 pub trait Tool {
     fn definition(&self) -> ToolDefinition;
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String>;
+    /// Optional: execute with a machine routing context.
+    /// Default implementation falls back to the simple execute().
+    fn execute_with_context(
+        &self,
+        args: &str,
+        runtime_id: &str,
+        _ctx: Option<&ToolExecutionContext>,
+    ) -> Result<ToolResult, String> {
+        self.execute(args, runtime_id)
+    }
 }
 
 pub struct ToolRegistry {
@@ -143,6 +153,21 @@ impl ToolRegistry {
             Err(format!("tool not found: {}", name))
         }
     }
+
+    /// Execute with machine routing context (Phase 3).
+    pub fn execute_with_context(
+        &self,
+        name: &str,
+        args: &str,
+        runtime_id: &str,
+        ctx: Option<&ToolExecutionContext>,
+    ) -> Result<ToolResult, String> {
+        if let Some(tool) = self.tools.get(name) {
+            tool.execute_with_context(args, runtime_id, ctx)
+        } else {
+            Err(format!("tool not found: {}", name))
+        }
+    }
 }
 
 // Built-in tools
@@ -153,6 +178,9 @@ pub mod terminal_signal;
 pub mod browser;
 pub mod computer;
 pub mod task;
+pub mod context;
+
+pub use context::ToolExecutionContext;
 
 pub use exec::ShellExecTool;
 pub use fs::{FsReadTool, FsWriteTool, FsListTool, FsSearchTool, FsStatTool, FsPatchTool, FsMkdirTool, FsRemoveTool, FsRenameTool, FsGlobTool};

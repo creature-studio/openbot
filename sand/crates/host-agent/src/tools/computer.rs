@@ -1,4 +1,4 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 use std::process::Command;
 
 fn raw_rpc(req: &str) -> Result<String, String> {
@@ -176,6 +176,9 @@ impl Tool for ComputerScreenshotTool {
         }
     }
     fn execute(&self, _args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(_args, runtime_id, None)
+    }
+    fn execute_with_context(&self, _args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         // Try sandd first if runtime_id available
         if !runtime_id.is_empty() {
             if let Ok(data) = try_screenshot_via_sandd(runtime_id) {
@@ -202,6 +205,9 @@ impl Tool for ComputerClickTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let x = extract_number(args, "x").unwrap_or(0);
         let y = extract_number(args, "y").unwrap_or(0);
         match try_click(x, y, runtime_id) {
@@ -220,6 +226,9 @@ impl Tool for ComputerTypeTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let text = extract_arg(args, "text").unwrap_or_default();
         match try_type(&text, runtime_id) {
             Ok(_) => Ok(ToolResult::success(format!("typed: {} via runtime {}", text, runtime_id))),
@@ -237,6 +246,9 @@ impl Tool for ComputerMoveTool {
         }
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, _runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let x = extract_number(args, "x").unwrap_or(0);
         let y = extract_number(args, "y").unwrap_or(0);
         Ok(ToolResult::success(format!("computer.move placeholder: would move to {},{} via XTest", x, y)))
@@ -252,6 +264,9 @@ impl Tool for ComputerKeyTool {
         }
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, _runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let key = extract_arg(args, "key").unwrap_or_default();
         Ok(ToolResult::success(format!("computer.key placeholder: would press {} via XTest", key)))
     }
@@ -266,6 +281,9 @@ impl Tool for ComputerScrollTool {
         }
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, _runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let dx = extract_number(args, "dx").unwrap_or(0);
         let dy = extract_number(args, "dy").unwrap_or(0);
         Ok(ToolResult::success(format!("computer.scroll placeholder: would scroll {},{} via XTest", dx, dy)))

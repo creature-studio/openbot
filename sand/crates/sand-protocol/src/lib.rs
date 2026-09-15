@@ -2,6 +2,57 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// ---------------------------------------------------------------------------
+// MachineId — machines are first-class in the protocol.
+// ---------------------------------------------------------------------------
+//
+// A Machine is where a Runtime lives: either local (host-agent's own machine)
+// or remote (SSH-accessible machine running its own sandd).
+//
+// MachineId is used to route all Runtime operations:
+//   Runtime → MachineId → Transport (LocalTransport / SshTransport)
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MachineId(pub String);
+
+impl MachineId {
+    pub fn new() -> Self {
+        let mut buf = [0u8; 16];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            let _ = f.read_exact(&mut buf);
+        } else {
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let pid = std::process::id() as u128;
+            let combined = now ^ (pid << 32);
+            buf[..16].copy_from_slice(&combined.to_le_bytes()[..16.min(16)]);
+        }
+        Self(format!("mach-{}", &buf.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>()[..8].join("")))
+    }
+
+    pub fn local() -> Self {
+        Self("machine-local".to_string())
+    }
+
+    pub fn from_string(s: String) -> Self {
+        Self(s)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MachineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RuntimeId
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeId(pub String);
 
@@ -111,6 +162,9 @@ pub struct Runtime {
     pub capabilities: Vec<String>,
     pub process_count: usize,
     pub pty_count: usize,
+    /// Which machine this runtime lives on. Local = host-agent's machine;
+    /// remote = SSH machine with its own sandd.
+    pub machine_id: MachineId,
 }
 
 #[derive(Debug, Clone)]
@@ -210,17 +264,18 @@ pub fn now_ms() -> u64 {
 impl Runtime {
     pub fn to_json_line(&self) -> String {
         format!(
-            "{{\"id\":\"{}\",\"kind\":\"{}\",\"state\":\"{}\",\"workspace\":\"{}\",\"cgroup\":\"{}\",\"created\":{},\"started\":{},\"caps\":[{}],\"procs\":{},\"ptys\":{}}}",
+            "{{\\"id\\":\\"{}\\",\\"kind\\":\\"{}\\",\\"state\\":\\"{}\\",\\"workspace\\":\\"{}\\",\\"cgroup\\":\\"{}\\",\\"created\\":{},\\"started\\":{},\\"caps\\":[{}],\\"procs\\":{},\\"ptys\\":{},\\"machine_id\\":\\"{}\\"}}",
             self.id.0,
             self.kind.as_str(),
-            self.state.as_str().replace('\"', "'"),
+            self.state.as_str().replace('\\"', "'"),
             self.workspace.display(),
             self.cgroup_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             self.created_at_ms,
             self.started_at_ms.unwrap_or(0),
-            self.capabilities.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(","),
+            self.capabilities.iter().map(|c| format!("\\\"{}\\\"", c)).collect::<Vec<_>>().join(","),
             self.process_count,
-            self.pty_count
+            self.pty_count,
+            self.machine_id.0
         )
     }
 }

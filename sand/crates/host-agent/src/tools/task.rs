@@ -1,4 +1,4 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 
 pub struct TaskCompleteTool;
 pub struct TaskCreateTool;
@@ -13,6 +13,9 @@ impl Tool for TaskCompleteTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let result = extract_arg(args, "result").unwrap_or_else(|| "completed".to_string());
         // Update SQLite task table to ReadyForCheck if exists, else create entry
         let path = if std::path::Path::new("/run/sand/state.db").exists() { "/run/sand/state.db" } else { "/tmp/sandd/state.db" };
@@ -59,6 +62,9 @@ impl Tool for TaskCreateTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let goal = extract_arg(args, "goal").ok_or("missing goal")?;
         Ok(ToolResult::success(format!("task.create goal '{}' in runtime {} - would create Task with session", goal, runtime_id)))
     }
@@ -73,6 +79,9 @@ impl Tool for TaskListTool {
         }
     }
     fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(_args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, _args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         // Query SQLite for tasks
         let path = if std::path::Path::new("/run/sand/state.db").exists() { "/run/sand/state.db" } else { "/tmp/sandd/state.db" };
         if std::path::Path::new(path).exists() {
