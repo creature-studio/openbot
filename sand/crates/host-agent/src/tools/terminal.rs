@@ -42,20 +42,25 @@ impl Tool for TerminalWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "terminal.write".to_string(),
-            description: "Write data to a PTY terminal.".to_string(),
+            description: "Write data to a PTY terminal via binary RPC (no base64 overhead).".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"pty_id":{"type":"string"},"data":{"type":"string"}},"required":["pty_id","data"]}"#.to_string(),
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         let data = extract_arg(args, "data").ok_or("missing data")?;
-        // Need to base64 encode data for RPC
-        let b64 = base64_encode(data.as_bytes());
-        // Use direct RPC via socat? For now use client method that doesn't exist, so we do raw call
-        let req = format!(r#"{{"method":"WritePty","id":"{}","pty_id":"{}","data_b64":"{}"}}"#, runtime_id, pty_id, b64);
-        match raw_rpc(&req) {
-            Ok(resp) => Ok(ToolResult { content: format!("write to {}: {}", pty_id, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("write failed: {}", e), is_error: true }),
+        // Try binary RPC first (efficient, no base64)
+        match self.client.write_pty_binary(runtime_id, &pty_id, data.as_bytes()) {
+            Ok(resp) => Ok(ToolResult { content: format!("write to {} via binary RPC: {}", pty_id, resp), is_error: false }),
+            Err(_) => {
+                // Fallback to base64 JSON RPC
+                let b64 = base64_encode(data.as_bytes());
+                let req = format!(r#"{{"method":"WritePty","id":"{}","pty_id":"{}","data_b64":"{}"}}"#, runtime_id, pty_id, b64);
+                match raw_rpc(&req) {
+                    Ok(resp) => Ok(ToolResult { content: format!("write to {}: {}", pty_id, resp), is_error: false }),
+                    Err(e) => Ok(ToolResult { content: format!("write failed: {}", e), is_error: true }),
+                }
+            }
         }
     }
 }
@@ -64,21 +69,29 @@ impl Tool for TerminalReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "terminal.read".to_string(),
-            description: "Read output from a PTY terminal.".to_string(),
+            description: "Read output from a PTY terminal via binary RPC (raw bytes).".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"pty_id":{"type":"string"},"clear":{"type":"boolean"}},"required":["pty_id"]}"#.to_string(),
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         let clear = args.contains("\"clear\":true");
-        let req = format!(r#"{{"method":"ReadPty","id":"{}","pty_id":"{}","clear":{}}}"#, runtime_id, pty_id, clear);
-        match raw_rpc(&req) {
-            Ok(resp) => {
-                let b64 = extract_field(&resp, "data_b64").unwrap_or_default();
-                let data = base64_decode(&b64);
-                Ok(ToolResult { content: format!("pty {} output ({} bytes):\n{}", pty_id, data.len(), String::from_utf8_lossy(&data)), is_error: false })
+        // Try binary RPC
+        match self.client.read_pty_binary(runtime_id, &pty_id, clear) {
+            Ok((json, data)) => {
+                Ok(ToolResult { content: format!("pty {} output via binary RPC ({} bytes) json={}:\n{}", pty_id, data.len(), json, String::from_utf8_lossy(&data)), is_error: false })
             }
-            Err(e) => Ok(ToolResult { content: format!("read failed: {}", e), is_error: true }),
+            Err(_) => {
+                let req = format!(r#"{{"method":"ReadPty","id":"{}","pty_id":"{}","clear":{}}}"#, runtime_id, pty_id, clear);
+                match raw_rpc(&req) {
+                    Ok(resp) => {
+                        let b64 = extract_field(&resp, "data_b64").unwrap_or_default();
+                        let data = base64_decode(&b64);
+                        Ok(ToolResult { content: format!("pty {} output ({} bytes):\n{}", pty_id, data.len(), String::from_utf8_lossy(&data)), is_error: false })
+                    }
+                    Err(e) => Ok(ToolResult { content: format!("read failed: {}", e), is_error: true }),
+                }
+            }
         }
     }
 }

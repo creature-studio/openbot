@@ -59,7 +59,6 @@ fn handle_client(stream: UnixStream, mgr: Arc<RuntimeManager>) -> std::io::Resul
     {
         if let Ok(creds) = get_peer_cred(&stream) {
             eprintln!("[rpc] client peer pid={} uid={} gid={}", creds.pid, creds.uid, creds.gid);
-            // Future: enforce group sand or uid check, capability check
         }
     }
 
@@ -72,6 +71,39 @@ fn handle_client(stream: UnixStream, mgr: Arc<RuntimeManager>) -> std::io::Resul
         if trimmed.is_empty() {
             line.clear();
             continue;
+        }
+
+        // Check if SubscribeEvents streaming
+        let method = extract_string_field(trimmed, "method").unwrap_or_default();
+        if method == "SubscribeEvents" {
+            // Stream events: first send current events, then stream new ones
+            let id_filter = extract_string_field(trimmed, "id");
+            // Send header ok
+            writeln!(writer, "{{\"ok\":true,\"streaming\":true}}")?;
+            writer.flush()?;
+            // Subscribe
+            let rx = mgr.event_bus().subscribe();
+            // Also send existing events? We'll send list first as separate?
+            loop {
+                match rx.recv() {
+                    Ok(ev) => {
+                        if let Some(ref filter_id) = id_filter {
+                            if ev.runtime_id.0 != *filter_id {
+                                continue;
+                            }
+                        }
+                        let line = format!("{{\"runtime_id\":\"{}\",\"kind\":\"{}\",\"at_ms\":{}}}", ev.runtime_id.0, ev.kind.as_str(), ev.at_ms);
+                        if writeln!(writer, "{}", line).is_err() {
+                            break;
+                        }
+                        if writer.flush().is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            break;
         }
 
         let response = handle_request(trimmed, &mgr);
@@ -120,6 +152,10 @@ fn get_peer_cred(stream: &UnixStream) -> std::io::Result<PeerCred> {
 #[cfg(unix)]
 extern "C" {
     fn getsockopt(sockfd: i32, level: i32, optname: i32, optval: *mut std::os::raw::c_void, optlen: *mut u32) -> i32;
+}
+
+pub fn handle_request_public(req_str: &str, mgr: &RuntimeManager) -> String {
+    handle_request(req_str, mgr)
 }
 
 fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
@@ -323,6 +359,40 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
         "Status" => {
             let list = mgr.list_runtimes();
             format!("{{\"ok\":true,\"runtime_count\":{},\"version\":\"0.1.0\"}}", list.len())
+        }
+        "ListEvents" => {
+            let id_str = extract_string_field(req_str, "id");
+            let events = if let Some(id_s) = id_str {
+                let rid = RuntimeId::from_string(id_s);
+                mgr.event_bus().list_for(&rid)
+            } else {
+                mgr.event_bus().list()
+            };
+            let mut items = Vec::new();
+            for ev in events.iter().rev().take(100) {
+                items.push(format!("{{\"runtime_id\":\"{}\",\"kind\":\"{}\",\"at_ms\":{}}}", ev.runtime_id.0, ev.kind.as_str(), ev.at_ms));
+            }
+            format!("{{\"ok\":true,\"events\":[{}]}}", items.join(","))
+        }
+        "SubscribeEvents" => {
+            format!("{{\"ok\":false,\"error\":\"use streaming handler\"}}")
+        }
+        "EnsureDisplay" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let width = extract_number_field(req_str, "width").unwrap_or(1280);
+            let height = extract_number_field(req_str, "height").unwrap_or(720);
+            match mgr.desktop_manager().ensure_display(&id_str, width as u32, height as u32) {
+                Ok(d) => format!("{{\"ok\":true,\"display\":\"{}\"}}", d),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        "GetDisplay" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            if let Some(d) = mgr.desktop_manager().get_display(&id_str) {
+                format!("{{\"ok\":true,\"display\":\"{}\"}}", d)
+            } else {
+                format!("{{\"ok\":false,\"error\":\"no display\"}}")
+            }
         }
         _ => {
             format!("{{\"ok\":false,\"error\":\"unknown method {}\"}}", escape_json(&method))

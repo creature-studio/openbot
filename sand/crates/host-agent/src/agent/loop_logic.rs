@@ -78,6 +78,7 @@ impl AgentLoop {
 
             // Execute tool calls (serial for now, can be concurrent)
             session.status = AgentStatus::WaitingTool;
+            let mut should_freeze = false;
             for tc in &response.tool_calls {
                 event_cb(LoopEvent::ToolCallStarted { name: tc.name.clone(), args: tc.arguments.clone() });
                 let result = tools.execute(&tc.name, &tc.arguments, &session.runtime_id);
@@ -86,9 +87,19 @@ impl AgentLoop {
                     Err(e) => format!("error: {}", e),
                 };
 
-                // Check permission attention
+                // Check permission attention -> freeze until approval
                 if result_str.contains("permission_required") {
                     event_cb(LoopEvent::Attention { attention: Attention::PermissionRequired { tool: tc.name.clone(), reason: result_str.clone() } });
+                    session.status = AgentStatus::WaitingInput;
+                    if tc.name == "shell.exec" {
+                        should_freeze = true;
+                    }
+                }
+
+                // Check task complete -> ReadyForCheck freeze
+                if tc.name == "task.complete" || result_str.contains("ReadyForCheck") || result_str.contains("task completed") {
+                    should_freeze = true;
+                    event_cb(LoopEvent::Attention { attention: Attention::ReadyForCheck });
                 }
 
                 // Add tool result message
@@ -101,6 +112,18 @@ impl AgentLoop {
                 });
 
                 event_cb(LoopEvent::ToolCallFinished { name: tc.name.clone(), result: result_str });
+            }
+            if should_freeze {
+                // Check if it was task complete vs permission
+                if session.status == AgentStatus::WaitingInput {
+                    // permission freeze
+                    event_cb(LoopEvent::Attention { attention: Attention::WaitingInput });
+                    return Ok("Permission required, awaiting approval".to_string());
+                } else {
+                    session.status = AgentStatus::ReadyForCheck;
+                    event_cb(LoopEvent::Completed { result: "Task marked ReadyForCheck, awaiting human approval".to_string() });
+                    return Ok("Task completed, awaiting approval (ReadyForCheck)".to_string());
+                }
             }
             session.status = AgentStatus::Running;
         }

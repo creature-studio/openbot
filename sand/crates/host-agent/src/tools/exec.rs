@@ -35,19 +35,28 @@ impl Tool for ShellExecTool {
                 eprintln!("[permission] ask required for: {} pattern {}", command, pat);
             }
         }
-        // Use sand-client exec
-        // Split command into shell -lc
+        // Use sand-client binary exec for efficiency (no base64)
         let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
-        match self.sand_client.exec(runtime_id, cmd_vec) {
-            Ok(resp) => {
-                // resp is JSON string with stdout_b64 etc, we need to decode
-                let stdout = extract_b64_field(&resp, "stdout_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
-                let stderr = extract_b64_field(&resp, "stderr_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
-                let exit_code = extract_number_field(&resp, "exit_code").unwrap_or(0);
-                let content = format!("exit_code: {}\nstdout:\n{}\nstderr:\n{}", exit_code, String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+        match self.sand_client.exec_binary(runtime_id, cmd_vec) {
+            Ok((json_resp, stdout, stderr)) => {
+                let exit_code = extract_number_field(&json_resp, "exit_code").unwrap_or(0);
+                let content = format!("exit_code: {}\nstdout (binary RPC, {} bytes, no base64):\n{}\nstderr:\n{}", exit_code, stdout.len(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
                 Ok(ToolResult { content, is_error: exit_code != 0 })
             }
-            Err(e) => Ok(ToolResult { content: format!("exec failed: {}", e), is_error: true }),
+            Err(_) => {
+                // Fallback to JSON RPC
+                let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
+                match self.sand_client.exec(runtime_id, cmd_vec) {
+                    Ok(resp) => {
+                        let stdout = extract_b64_field(&resp, "stdout_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
+                        let stderr = extract_b64_field(&resp, "stderr_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
+                        let exit_code = extract_number_field(&resp, "exit_code").unwrap_or(0);
+                        let content = format!("exit_code: {}\nstdout:\n{}\nstderr:\n{}", exit_code, String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+                        Ok(ToolResult { content, is_error: exit_code != 0 })
+                    }
+                    Err(e) => Ok(ToolResult { content: format!("exec failed: {}", e), is_error: true }),
+                }
+            }
         }
     }
 }

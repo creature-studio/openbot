@@ -175,6 +175,23 @@ pub enum RuntimeEventKind {
     Failed { reason: String },
 }
 
+impl RuntimeEventKind {
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Created => "created".to_string(),
+            Self::Started => "started".to_string(),
+            Self::Stopped => "stopped".to_string(),
+            Self::Destroyed => "destroyed".to_string(),
+            Self::ProcessStarted { pid } => format!("process_started:{}", pid),
+            Self::ProcessExited { pid, code } => format!("process_exited:{}:{:?}", pid, code),
+            Self::PtyOpened { pty_id } => format!("pty_opened:{}", pty_id),
+            Self::PtyClosed { pty_id } => format!("pty_closed:{}", pty_id),
+            Self::Oom => "oom".to_string(),
+            Self::Failed { reason } => format!("failed:{}", reason),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeEvent {
     pub runtime_id: RuntimeId,

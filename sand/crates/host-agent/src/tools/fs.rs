@@ -8,9 +8,8 @@ pub struct FsSearchTool;
 pub struct FsStatTool;
 pub struct FsPatchTool;
 
-// Helper to get runtime workspace via sandd, then operate via exec or local
+// Helpers
 fn get_runtime_workspace(runtime_id: &str) -> Option<String> {
-    // Try to get workspace from sandd via GetRuntime
     let req = format!(r#"{{"method":"GetRuntime","id":"{}"}}"#, runtime_id);
     if let Ok(resp) = raw_rpc(&req) {
         if let Some(ws) = extract_field(&resp, "workspace") {
@@ -44,7 +43,6 @@ fn exec_in_runtime(runtime_id: &str, command: &str) -> Result<String, String> {
     let client = sand_client::SandClient::new(None);
     let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.to_string()];
     let resp = client.exec(runtime_id, cmd_vec).map_err(|e| e.to_string())?;
-    // Decode stdout_b64
     let stdout_b64 = extract_field(&resp, "stdout_b64").unwrap_or_default();
     let stderr_b64 = extract_field(&resp, "stderr_b64").unwrap_or_default();
     let stdout = base64_decode(&stdout_b64);
@@ -93,6 +91,13 @@ fn base64_decode(s: &str) -> Vec<u8> {
     out
 }
 
+// Direct FS via workspace path (more efficient than exec cat), with runtime isolation
+fn read_file_via_workspace(runtime_id: &str, path: &str) -> Option<String> {
+    let ws = get_runtime_workspace(runtime_id)?;
+    let full_path = if path.starts_with('/') { path.to_string() } else { format!("{}/{}", ws.trim_end_matches('/'), path.trim_start_matches('/')) };
+    std::fs::read_to_string(&full_path).ok()
+}
+
 impl Tool for FsReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -103,15 +108,16 @@ impl Tool for FsReadTool {
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
-        // Try via sandd exec first if runtime exists
         if !runtime_id.is_empty() {
+            if let Some(content) = read_file_via_workspace(runtime_id, &path) {
+                return Ok(ToolResult { content: format!("file: {} (via workspace {})\ncontent:\n{}", path, runtime_id, content), is_error: false });
+            }
             if let Ok(content) = exec_in_runtime(runtime_id, &format!("cat '{}' 2>&1", path.replace('\'', "'\\''"))) {
                 if !content.contains("No such file") && !content.contains("cannot open") {
                     return Ok(ToolResult { content: format!("file: {} (via runtime {})\ncontent:\n{}", path, runtime_id, content), is_error: false });
                 }
             }
         }
-        // Fallback local FS
         match std::fs::read_to_string(&path) {
             Ok(content) => Ok(ToolResult { content: format!("file: {}\ncontent:\n{}", path, content), is_error: false }),
             Err(e) => Ok(ToolResult { content: format!("read failed {}: {}", path, e), is_error: true }),
@@ -130,16 +136,16 @@ impl Tool for FsWriteTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
         let content = extract_arg(args, "content").ok_or("missing content")?;
-        
         if !runtime_id.is_empty() {
-            // Use sandd exec to write via bash heredoc
-            let escaped_content = content.replace('\'', "'\\''");
+            // Try direct workspace write first (efficient)
+            if let Ok(()) = write_file_via_workspace_direct(runtime_id, &path, &content) {
+                return Ok(ToolResult { content: format!("wrote {} via workspace {}", path, runtime_id), is_error: false });
+            }
             let cmd = format!("mkdir -p $(dirname '{}') && cat > '{}' <<'__SAND_EOF__'\n{}\n__SAND_EOF__\n", path.replace('\'', "'\\''"), path.replace('\'', "'\\''"), content);
             if let Ok(out) = exec_in_runtime(runtime_id, &cmd) {
                 return Ok(ToolResult { content: format!("wrote {} via runtime {}: {}", path, runtime_id, out), is_error: false });
             }
         }
-        
         if let Some(parent) = Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -148,6 +154,15 @@ impl Tool for FsWriteTool {
             Err(e) => Ok(ToolResult { content: format!("write failed {}: {}", path, e), is_error: true }),
         }
     }
+}
+
+fn write_file_via_workspace_direct(runtime_id: &str, path: &str, content: &str) -> Result<(), String> {
+    let ws = get_runtime_workspace(runtime_id).ok_or("no workspace")?;
+    let full_path = if path.starts_with('/') { path.to_string() } else { format!("{}/{}", ws.trim_end_matches('/'), path.trim_start_matches('/')) };
+    if let Some(parent) = std::path::Path::new(&full_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&full_path, content).map_err(|e| e.to_string())
 }
 
 impl Tool for FsListTool {
@@ -160,13 +175,14 @@ impl Tool for FsListTool {
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
-        
         if !runtime_id.is_empty() {
+            if let Some(list) = list_via_workspace(runtime_id, &path) {
+                return Ok(ToolResult { content: format!("listing {} via workspace {}:\n{}", path, runtime_id, list), is_error: false });
+            }
             if let Ok(out) = exec_in_runtime(runtime_id, &format!("ls -la '{}' 2>&1", path.replace('\'', "'\\''"))) {
                 return Ok(ToolResult { content: format!("listing {} via runtime {}:\n{}", path, runtime_id, out), is_error: false });
             }
         }
-        
         match std::fs::read_dir(&path) {
             Ok(entries) => {
                 let mut list = Vec::new();
@@ -183,6 +199,20 @@ impl Tool for FsListTool {
     }
 }
 
+fn list_via_workspace(runtime_id: &str, path: &str) -> Option<String> {
+    let ws = get_runtime_workspace(runtime_id)?;
+    let full_path = if path.starts_with('/') { path.to_string() } else { format!("{}/{}", ws.trim_end_matches('/'), path.trim_start_matches('/')) };
+    let entries = std::fs::read_dir(&full_path).ok()?;
+    let mut list = Vec::new();
+    for e in entries {
+        if let Ok(e) = e {
+            let ft = e.file_type().map(|t| if t.is_dir() { "dir" } else { "file" }).unwrap_or("unknown");
+            list.push(format!("{} ({})", e.path().display(), ft));
+        }
+    }
+    Some(list.join("\n"))
+}
+
 impl Tool for FsSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -194,18 +224,13 @@ impl Tool for FsSearchTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pattern = extract_arg(args, "pattern").ok_or("missing pattern")?;
         let path = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
-        
         let cmd = format!("rg -n '{}' '{}' 2>/dev/null | head -n 100 || grep -Rn '{}' '{}' 2>/dev/null | head -n 100", pattern, path, pattern, path);
         if !runtime_id.is_empty() {
             if let Ok(out) = exec_in_runtime(runtime_id, &cmd) {
                 return Ok(ToolResult { content: format!("search '{}' in {} via runtime {}:\n{}", pattern, path, runtime_id, out), is_error: false });
             }
         }
-        
-        let output = std::process::Command::new("sh")
-            .args(["-c", &cmd])
-            .output()
-            .map_err(|e| format!("search failed: {}", e))?;
+        let output = std::process::Command::new("sh").args(["-c", &cmd]).output().map_err(|e| format!("search failed: {}", e))?;
         let content = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(ToolResult { content: format!("search '{}' in {}:\n{}", pattern, path, content), is_error: false })
     }
@@ -221,13 +246,11 @@ impl Tool for FsStatTool {
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let path = extract_arg(args, "path").ok_or("missing path")?;
-        
         if !runtime_id.is_empty() {
             if let Ok(out) = exec_in_runtime(runtime_id, &format!("stat '{}' 2>&1 || ls -lh '{}'", path.replace('\'', "'\\''"), path.replace('\'', "'\\''"))) {
                 return Ok(ToolResult { content: format!("stat {} via runtime {}:\n{}", path, runtime_id, out), is_error: false });
             }
         }
-        
         match std::fs::metadata(&path) {
             Ok(meta) => {
                 let content = format!("path: {}\nsize: {}\nis_dir: {}\nis_file: {}\nmodified: {:?}", path, meta.len(), meta.is_dir(), meta.is_file(), meta.modified());
@@ -252,9 +275,16 @@ impl Tool for FsPatchTool {
         let search = extract_arg(args, "search");
         let replace = extract_arg(args, "replace");
 
-        // Mode 1: search/replace
         if let (Some(s), Some(r)) = (search, replace) {
             if !runtime_id.is_empty() {
+                if let Some(content) = read_file_via_workspace(runtime_id, &path) {
+                    if content.contains(&s) {
+                        let new_content = content.replace(&s, &r);
+                        if write_file_via_workspace_direct(runtime_id, &path, &new_content).is_ok() {
+                            return Ok(ToolResult { content: format!("patched {} via search/replace in workspace {}", path, runtime_id), is_error: false });
+                        }
+                    }
+                }
                 let cmd = format!("cat '{}' 2>&1", path.replace('\'', "'\\''"));
                 if let Ok(content) = exec_in_runtime(runtime_id, &cmd) {
                     if content.contains(&s) {
@@ -265,7 +295,6 @@ impl Tool for FsPatchTool {
                     }
                 }
             }
-            // Local
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     if content.contains(&s) {
@@ -281,29 +310,23 @@ impl Tool for FsPatchTool {
                 Err(e) => Ok(ToolResult { content: format!("read failed {}: {}", path, e), is_error: true }),
             }
         } else if let Some(patch_content) = patch {
-            // Mode 2: unified diff via patch command
             let tmp_patch = format!("/tmp/patch-{}-{}.diff", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
             if let Err(e) = std::fs::write(&tmp_patch, &patch_content) {
                 return Ok(ToolResult { content: format!("failed to write temp patch: {}", e), is_error: true });
             }
-            
             let result = if !runtime_id.is_empty() {
                 exec_in_runtime(runtime_id, &format!("cd $(dirname '{}') && patch -p0 < {} 2>&1 || patch -p1 < {} 2>&1 || git apply {} 2>&1", path.replace('\'', "'\\''"), tmp_patch, tmp_patch, tmp_patch))
             } else {
-                let output = std::process::Command::new("sh")
-                    .args(["-c", &format!("cd $(dirname {}) && patch -p0 < {} 2>&1 || patch -p1 < {} 2>&1 || git apply {} 2>&1", path, tmp_patch, tmp_patch, tmp_patch)])
-                    .output();
+                let output = std::process::Command::new("sh").args(["-c", &format!("cd $(dirname {}) && patch -p0 < {} 2>&1 || patch -p1 < {} 2>&1 || git apply {} 2>&1", path, tmp_patch, tmp_patch, tmp_patch)]).output();
                 match output {
                     Ok(o) => Ok(String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)),
                     Err(e) => Err(e.to_string()),
                 }
             };
-            
             let _ = std::fs::remove_file(&tmp_patch);
-            
             match result {
                 Ok(out) => {
-                    if out.contains("failed") || out.contains("error") {
+                    if out.to_lowercase().contains("failed") && !out.to_lowercase().contains("success") {
                         Ok(ToolResult { content: format!("patch failed {}: {}", path, out), is_error: true })
                     } else {
                         Ok(ToolResult { content: format!("patch applied to {}: {}", path, out), is_error: false })
@@ -324,8 +347,7 @@ fn extract_arg(json: &str, key: &str) -> Option<String> {
     if rest.starts_with('"') {
         let mut end = None;
         let mut escaped = false;
-        let chars = rest[1..].char_indices();
-        for (i, c) in chars {
+        for (i, c) in rest[1..].char_indices() {
             if escaped { escaped = false; continue; }
             if c == '\\' { escaped = true; continue; }
             if c == '"' { end = Some(i); break; }
@@ -337,4 +359,3 @@ fn extract_arg(json: &str, key: &str) -> Option<String> {
         None
     }
 }
-

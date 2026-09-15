@@ -7,6 +7,8 @@ mod state_sqlite;
 mod events;
 mod cgroup;
 mod rpc;
+mod rpc_binary;
+mod desktop;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,21 +22,25 @@ use state::StateManager;
 use events::EventBus;
 use cgroup::CgroupManager;
 use rpc::RpcServer;
+use rpc_binary::BinaryRpcServer;
 
 fn main() {
     // setup tracing via eprintln
     eprintln!("[sandd] starting at {}", now_ms());
 
     // ensure /run/sand exists, fallback to /tmp/sandd
-    let sock_path = if Path::new("/run/sand").exists() || std::fs::create_dir_all("/run/sand").is_ok() {
-        PathBuf::from("/run/sand/sandd.sock")
+    let base_dir = if Path::new("/run/sand").exists() || std::fs::create_dir_all("/run/sand").is_ok() {
+        PathBuf::from("/run/sand")
     } else {
         let _ = std::fs::create_dir_all("/tmp/sandd");
-        PathBuf::from("/tmp/sandd/sandd.sock")
+        PathBuf::from("/tmp/sandd")
     };
+    let sock_path = base_dir.join("sandd.sock");
+    let binary_sock_path = base_dir.join("sandd-binary.sock");
 
-    // clean old socket
+    // clean old sockets
     let _ = std::fs::remove_file(&sock_path);
+    let _ = std::fs::remove_file(&binary_sock_path);
 
     // init managers
     let state_path = if Path::new("/run/sand").exists() {
@@ -53,10 +59,20 @@ fn main() {
         eprintln!("[sandd] recover failed: {:?}", e);
     }
 
-    // start RPC server
+    // start binary RPC server in background thread
+    let binary_mgr = runtime_mgr.clone();
+    let binary_path = binary_sock_path.clone();
+    std::thread::spawn(move || {
+        let binary_server = BinaryRpcServer::new(binary_path, binary_mgr);
+        if let Err(e) = binary_server.run() {
+            eprintln!("[sandd] binary rpc error: {:?}", e);
+        }
+    });
+
+    // start RPC server (blocking)
     let rpc_server = RpcServer::new(sock_path.clone(), runtime_mgr.clone());
 
-    eprintln!("[sandd] listening on {}", sock_path.display());
+    eprintln!("[sandd] listening on {} and binary {}", sock_path.display(), binary_sock_path.display());
 
     // handle signals for graceful shutdown? simple loop
     if let Err(e) = rpc_server.run() {

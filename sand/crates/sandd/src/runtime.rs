@@ -10,6 +10,7 @@ use crate::cgroup::CgroupManager;
 use crate::events::EventBus;
 use crate::process::ProcessManager;
 use crate::pty::PtyManager;
+use crate::desktop::DesktopManager;
 
 pub struct RuntimeManager {
     runtimes: Arc<Mutex<HashMap<String, Runtime>>>,
@@ -19,12 +20,14 @@ pub struct RuntimeManager {
     event_bus: Arc<EventBus>,
     pty_mgr: Arc<PtyManager>,
     proc_mgr: Arc<ProcessManager>,
+    desktop_mgr: Arc<DesktopManager>,
 }
 
 impl RuntimeManager {
     pub fn new(state_mgr: Arc<StateManager>, cgroup_mgr: Arc<CgroupManager>, event_bus: Arc<EventBus>) -> Self {
         let pty_mgr = Arc::new(PtyManager::new());
         let proc_mgr = Arc::new(ProcessManager::new(cgroup_mgr.clone()));
+        let desktop_mgr = Arc::new(DesktopManager::new());
         Self {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -33,6 +36,7 @@ impl RuntimeManager {
             event_bus,
             pty_mgr,
             proc_mgr,
+            desktop_mgr,
         }
     }
 
@@ -176,6 +180,9 @@ impl RuntimeManager {
         // remove workspace? keep for now, but clean?
         // let _ = fs::remove_dir_all(&rt.workspace);
 
+        // destroy desktop
+        self.desktop_mgr.destroy(&id.0);
+
         // remove from memory and state
         {
             let mut runtimes = self.runtimes.lock().unwrap();
@@ -227,5 +234,9 @@ impl RuntimeManager {
 
     pub fn cgroup_manager(&self) -> Arc<CgroupManager> {
         self.cgroup_mgr.clone()
+    }
+
+    pub fn desktop_manager(&self) -> Arc<DesktopManager> {
+        self.desktop_mgr.clone()
     }
 }

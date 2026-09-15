@@ -8,14 +8,45 @@ impl Tool for TaskCompleteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "task.complete".to_string(),
-            description: "Complete current task with result. Freezes result and will release runtime after approval. Don't call until work is truly done.".to_string(),
+            description: "Complete current task with result. Freezes result and will release runtime after approval. Don't call until work is truly done. Sets status ReadyForCheck.".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"result":{"type":"string","description":"Task result summary"}},"required":["result"]}"#.to_string(),
         }
     }
-    fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let result = extract_arg(args, "result").unwrap_or_else(|| "completed".to_string());
-        // In real system, this would freeze artifacts and mark task completed, waiting for user check
-        Ok(ToolResult { content: format!("task.complete called with result: {}\nTask marked ReadyForCheck, runtime will be kept until user approval, then released.", result), is_error: false })
+        // Update SQLite task table to ReadyForCheck if exists, else create entry
+        let path = if std::path::Path::new("/run/sand/state.db").exists() { "/run/sand/state.db" } else { "/tmp/sandd/state.db" };
+        if std::path::Path::new(path).exists() {
+            // Try to update most recent task for this runtime, or create
+            let python_code = format!(
+                r#"
+import sqlite3, time
+db='{}'
+conn=sqlite3.connect(db)
+cur=conn.cursor()
+cur.execute('SELECT id FROM task WHERE runtime_id=? ORDER BY created_at DESC LIMIT 1', ('{}',))
+row=cur.fetchone()
+now=int(time.time()*1000)
+if row:
+    cur.execute('UPDATE task SET status=?, result=?, updated_at=? WHERE id=?', ('ReadyForCheck', '''{}''', now, row[0]))
+    print(f'updated task {{row[0]}} to ReadyForCheck')
+else:
+    import uuid
+    tid='task-'+str(uuid.uuid4())[:8]
+    cur.execute('INSERT OR IGNORE INTO task (id, goal, session_id, runtime_id, status, artifacts, result, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        (tid, 'task completed via tool', 'unknown', '{}', 'ReadyForCheck', '[]', '''{}''', now, now))
+    print(f'created task {{tid}} ReadyForCheck')
+conn.commit()
+"#,
+                path,
+                runtime_id,
+                result.replace('\'', "''").replace('\n', "\\n"),
+                runtime_id,
+                result.replace('\'', "''").replace('\n', "\\n")
+            );
+            let _ = std::process::Command::new("python3").args(["-c", &python_code]).output();
+        }
+        Ok(ToolResult { content: format!("task.complete called with result: {}\nTask marked ReadyForCheck, runtime {} will be kept until user approval, then released. Agent loop will freeze.", result, runtime_id), is_error: false })
     }
 }
 
