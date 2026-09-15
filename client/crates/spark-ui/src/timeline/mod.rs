@@ -79,7 +79,7 @@ impl Render for TaskTimeline {
                 .justify_center()
                 .h_full()
                 .text_color(gpui::rgb(0x6b7280))
-                .child("Select a task to view timeline");
+                .child("Select a task to view timeline").into_any_element();
         };
 
         // Goal header
@@ -114,21 +114,21 @@ impl Render for TaskTimeline {
             .overflow_y_scroll()
             .child(header)
             .child(status)
-            .child(items_div)
+            .child(items_div).into_any_element()
     }
 }
 
 impl TaskTimeline {
     fn render_timeline_item(&self, item: &TimelineItem) -> impl IntoElement {
         match item {
-            TimelineItem::UserMessage(msg) => self.render_user_message(msg),
-            TimelineItem::AssistantMessage(msg) => self.render_assistant_message(msg),
-            TimelineItem::Status(s) => self.render_status(s),
-            TimelineItem::Tool(tool) => self.render_tool_card(tool),
-            TimelineItem::Permission(perm) => self.render_permission(perm),
-            TimelineItem::ReadyForCheck(rfc) => self.render_ready_for_check(rfc),
-            TimelineItem::Error(err) => self.render_error(err),
-            TimelineItem::Artifact(art) => self.render_artifact(art),
+            TimelineItem::UserMessage(msg) => self.render_user_message(msg).into_any_element(),
+            TimelineItem::AssistantMessage(msg) => self.render_assistant_message(msg).into_any_element(),
+            TimelineItem::Status(s) => self.render_status(s).into_any_element(),
+            TimelineItem::Tool(tool) => self.render_tool_card(tool).into_any_element(),
+            TimelineItem::Permission(perm) => self.render_permission(perm).into_any_element(),
+            TimelineItem::ReadyForCheck(rfc) => self.render_ready_for_check(rfc).into_any_element(),
+            TimelineItem::Error(err) => self.render_error(err).into_any_element(),
+            TimelineItem::Artifact(art) => self.render_artifact(art).into_any_element(),
         }
     }
 

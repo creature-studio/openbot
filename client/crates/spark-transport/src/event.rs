@@ -4,7 +4,6 @@
 //! but are normalized for the client. The spark-ui stores consume these
 //! and update Entity<T> state.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use spark_model::{Machine, MachineId, MachineStatus, MachineKind};

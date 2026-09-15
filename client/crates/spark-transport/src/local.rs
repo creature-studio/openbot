@@ -619,7 +619,6 @@ impl RawRpc for LocalTransport {
 
 #[cfg(unix)]
 fn output_pid(output: &std::process::Output) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
     let _ = output;
     0
 }
