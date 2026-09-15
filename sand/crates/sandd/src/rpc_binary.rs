@@ -214,7 +214,7 @@ fn handle_binary_request(req_json: &str, binary_payload: Vec<u8>, mgr: &RuntimeM
                 Err(e) => (format!(r#"{{"ok":false,"error":"{}"}}"#, escape_json(&e)), vec![]),
             }
         }
-        "OpenPty" | "ResizePty" | "ClosePty" | "ListPtys" | "CreateRuntime" | "GetRuntime" | "ListRuntimes" | "DestroyRuntime" | "Status" | "SpawnBackground" | "ListEvents" | "EnsureDisplay" | "GetDisplay" => {
+        "OpenPty" | "ResizePty" | "ClosePty" | "ListPtys" | "CreateRuntime" | "GetRuntime" | "ListRuntimes" | "DestroyRuntime" | "Status" | "SpawnBackground" | "ListEvents" | "EnsureDisplay" | "GetDisplay" | "SignalPty" | "SetPtyRaw" | "SetDesiredState" | "GetObservedState" => {
             // For these, delegate to existing JSON handler (no binary)
             let json_resp = crate::rpc::handle_request_public(req_json, mgr);
             (json_resp, vec![])

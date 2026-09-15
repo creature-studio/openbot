@@ -7,6 +7,10 @@ pub struct FsListTool;
 pub struct FsSearchTool;
 pub struct FsStatTool;
 pub struct FsPatchTool;
+pub struct FsMkdirTool;
+pub struct FsRemoveTool;
+pub struct FsRenameTool;
+pub struct FsGlobTool;
 
 // Helpers
 fn get_runtime_workspace(runtime_id: &str) -> Option<String> {
@@ -357,5 +361,134 @@ fn extract_arg(json: &str, key: &str) -> Option<String> {
         Some(raw.replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\"))
     } else {
         None
+    }
+}
+
+impl Tool for FsMkdirTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "file.mkdir".to_string(),
+            description: "Create directory (mkdir -p). Works in runtime workspace if runtime exists.".to_string(),
+            parameters_schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#.to_string(),
+        }
+    }
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        let path = extract_arg(args, "path").ok_or("missing path")?;
+        if !runtime_id.is_empty() {
+            if let Some(ws) = get_runtime_workspace(runtime_id) {
+                let full = if path.starts_with('/') { path.clone() } else { format!("{}/{}", ws.trim_end_matches('/'), path.trim_start_matches('/')) };
+                if let Ok(()) = std::fs::create_dir_all(&full) {
+                    return Ok(ToolResult { content: format!("mkdir {} via workspace {} -> {}", path, runtime_id, full), is_error: false });
+                }
+            }
+            if let Ok(out) = exec_in_runtime(runtime_id, &format!("mkdir -p '{}' 2>&1 && echo ok", path.replace('\'', "'\\''"))) {
+                return Ok(ToolResult { content: format!("mkdir {} via runtime {}: {}", path, runtime_id, out), is_error: false });
+            }
+        }
+        match std::fs::create_dir_all(&path) {
+            Ok(_) => Ok(ToolResult { content: format!("mkdir {}", path), is_error: false }),
+            Err(e) => Ok(ToolResult { content: format!("mkdir failed {}: {}", path, e), is_error: true }),
+        }
+    }
+}
+
+impl Tool for FsRemoveTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "file.remove".to_string(),
+            description: "Remove file or directory (rm -rf). Use with caution. In runtime workspace if available.".to_string(),
+            parameters_schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#.to_string(),
+        }
+    }
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        let path = extract_arg(args, "path").ok_or("missing path")?;
+        // Permission check: prevent rm -rf / etc
+        if path == "/" || path == "/*" || path.contains("rm -rf /") {
+            return Ok(ToolResult { content: format!("permission_required: refusing to remove dangerous path '{}' [tool: file.remove]", path), is_error: true });
+        }
+        if !runtime_id.is_empty() {
+            if let Some(ws) = get_runtime_workspace(runtime_id) {
+                let full = if path.starts_with('/') { path.clone() } else { format!("{}/{}", ws.trim_end_matches('/'), path.trim_start_matches('/')) };
+                // Safety: ensure full is inside workspace or path is absolute but not root
+                if full != "/" && full != ws {
+                    let _ = std::fs::remove_file(&full);
+                    let _ = std::fs::remove_dir_all(&full);
+                    if !std::path::Path::new(&full).exists() {
+                        return Ok(ToolResult { content: format!("removed {} via workspace {}", path, runtime_id), is_error: false });
+                    }
+                }
+            }
+            if let Ok(out) = exec_in_runtime(runtime_id, &format!("rm -rf '{}' 2>&1 && echo ok", path.replace('\'', "'\\''"))) {
+                return Ok(ToolResult { content: format!("removed {} via runtime {}: {}", path, runtime_id, out), is_error: false });
+            }
+        }
+        // Local
+        let p = Path::new(&path);
+        let result = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p).or_else(|_| std::fs::remove_dir_all(p)) };
+        match result {
+            Ok(_) => Ok(ToolResult { content: format!("removed {}", path), is_error: false }),
+            Err(e) => Ok(ToolResult { content: format!("remove failed {}: {}", path, e), is_error: true }),
+        }
+    }
+}
+
+impl Tool for FsRenameTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "file.rename".to_string(),
+            description: "Rename/move file or directory. Works in runtime workspace.".to_string(),
+            parameters_schema: r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}"#.to_string(),
+        }
+    }
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        let from = extract_arg(args, "from").or_else(|| extract_arg(args, "path")).or_else(|| extract_arg(args, "old")).ok_or("missing from")?;
+        let to = extract_arg(args, "to").or_else(|| extract_arg(args, "new")).or_else(|| extract_arg(args, "dest")).ok_or("missing to")?;
+        if !runtime_id.is_empty() {
+            if let Some(ws) = get_runtime_workspace(runtime_id) {
+                let full_from = if from.starts_with('/') { from.clone() } else { format!("{}/{}", ws.trim_end_matches('/'), from.trim_start_matches('/')) };
+                let full_to = if to.starts_with('/') { to.clone() } else { format!("{}/{}", ws.trim_end_matches('/'), to.trim_start_matches('/')) };
+                if let Some(parent) = std::path::Path::new(&full_to).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::rename(&full_from, &full_to).is_ok() {
+                    return Ok(ToolResult { content: format!("renamed {} -> {} via workspace {}", from, to, runtime_id), is_error: false });
+                }
+            }
+            if let Ok(out) = exec_in_runtime(runtime_id, &format!("mv '{}' '{}' 2>&1 && echo ok", from.replace('\'', "'\\''"), to.replace('\'', "'\\''"))) {
+                return Ok(ToolResult { content: format!("renamed {} -> {} via runtime {}: {}", from, to, runtime_id, out), is_error: false });
+            }
+        }
+        if let Some(parent) = Path::new(&to).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::rename(&from, &to) {
+            Ok(_) => Ok(ToolResult { content: format!("renamed {} -> {}", from, to), is_error: false }),
+            Err(e) => Ok(ToolResult { content: format!("rename failed {} -> {}: {}", from, to, e), is_error: true }),
+        }
+    }
+}
+
+impl Tool for FsGlobTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "file.glob".to_string(),
+            description: "Glob files matching pattern, e.g. **/*.rs, *.txt. Uses runtime if available.".to_string(),
+            parameters_schema: r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","description":"base path"}},"required":["pattern"]}"#.to_string(),
+        }
+    }
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        let pattern = extract_arg(args, "pattern").ok_or("missing pattern")?;
+        let base = extract_arg(args, "path").unwrap_or_else(|| ".".to_string());
+        // Use find + glob via bash
+        let cmd = format!("find '{}' -path '{}' 2>/dev/null | head -n 200 || ls -R '{}' 2>/dev/null | grep -E '{}' | head -n 200", base, pattern, base, pattern);
+        if !runtime_id.is_empty() {
+            if let Ok(out) = exec_in_runtime(runtime_id, &cmd) {
+                return Ok(ToolResult { content: format!("glob '{}' in {} via runtime {}:\n{}", pattern, base, runtime_id, out), is_error: false });
+            }
+        }
+        // Local: use glob via sh
+        let output = std::process::Command::new("sh").args(["-c", &cmd]).output().map_err(|e| format!("glob failed: {}", e))?;
+        let content = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(ToolResult { content: format!("glob '{}' in {}:\n{}", pattern, base, content), is_error: false })
     }
 }

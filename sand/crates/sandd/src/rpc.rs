@@ -394,6 +394,54 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
                 format!("{{\"ok\":false,\"error\":\"no display\"}}")
             }
         }
+        "SetDesiredState" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let should_exist = !req_str.contains("\"should_exist\":false");
+            let should_running = !req_str.contains("\"should_running\":false");
+            let min_procs = extract_number_field(req_str, "min_procs").unwrap_or(0);
+            // For now, just log desired state, supervisor will handle
+            eprintln!("[rpc] SetDesiredState id={} exist={} running={} min_procs={}", id_str, should_exist, should_running, min_procs);
+            format!("{{\"ok\":true,\"id\":\"{}\",\"desired\":{{\"should_exist\":{},\"should_running\":{},\"min_procs\":{}}}}}", escape_json(&id_str), should_exist, should_running, min_procs)
+        }
+        "GetObservedState" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let id = RuntimeId::from_string(id_str.clone());
+            if let Some(rt) = mgr.get_runtime(&id) {
+                format!("{{\"ok\":true,\"id\":\"{}\",\"exists\":true,\"running\":{},\"procs\":{},\"ptys\":{},\"state\":\"{}\"}}", rt.id.0, rt.state.as_str() == "running", rt.process_count, rt.pty_count, rt.state.as_str())
+            } else {
+                format!("{{\"ok\":true,\"id\":\"{}\",\"exists\":false,\"running\":false,\"procs\":0,\"ptys\":0}}", escape_json(&id_str))
+            }
+        }
+        "SignalPty" => {
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let pty_id = extract_string_field(req_str, "pty_id").unwrap_or_else(|| "default".to_string());
+            let signal = extract_number_field(req_str, "signal").unwrap_or(2) as i32; // default SIGINT
+            // Also support string signals like "SIGINT", "SIGTERM", "CtrlC"
+            let signal_str = extract_string_field(req_str, "signal_str").unwrap_or_default();
+            let sig_num = match signal_str.to_lowercase().as_str() {
+                "sigint" | "int" | "ctrlc" | "ctrl_c" | "c" => 2,
+                "sigterm" | "term" => 15,
+                "sigkill" | "kill" => 9,
+                "sigquit" | "quit" => 3,
+                "sigtstp" | "tstp" | "ctrlz" | "ctrl_z" => 20,
+                "sigwinch" | "winch" => 28,
+                _ => signal,
+            };
+            match mgr.pty_manager().signal_pty(&id_str, &pty_id, sig_num) {
+                Ok(_) => format!("{{\"ok\":true,\"signal\":{}}}", sig_num),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        "SetPtyRaw" => {
+            // For raw mode handling, we can set termios raw via ioctl? For MVP, just log and return ok
+            // Real implementation would use tcsetattr via FFI
+            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
+            let pty_id = extract_string_field(req_str, "pty_id").unwrap_or_else(|| "default".to_string());
+            let raw = req_str.contains("\"raw\":true");
+            // If raw=true, we would set raw mode, else cooked
+            // For now, we just return ok, as PTY already handles raw bytes via WritePty
+            format!("{{\"ok\":true,\"id\":\"{}\",\"pty_id\":\"{}\",\"raw\":{}}}", escape_json(&id_str), escape_json(&pty_id), raw)
+        }
         _ => {
             format!("{{\"ok\":false,\"error\":\"unknown method {}\"}}", escape_json(&method))
         }

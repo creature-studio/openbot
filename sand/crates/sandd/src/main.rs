@@ -9,6 +9,7 @@ mod cgroup;
 mod rpc;
 mod rpc_binary;
 mod desktop;
+mod supervisor;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ use events::EventBus;
 use cgroup::CgroupManager;
 use rpc::RpcServer;
 use rpc_binary::BinaryRpcServer;
+use supervisor::Supervisor;
 
 fn main() {
     // setup tracing via eprintln
@@ -58,6 +60,11 @@ fn main() {
     if let Err(e) = runtime_mgr.recover() {
         eprintln!("[sandd] recover failed: {:?}", e);
     }
+
+    // start supervisor
+    let supervisor = std::sync::Arc::new(Supervisor::new(runtime_mgr.clone()));
+    supervisor.clone().run_loop();
+    eprintln!("[sandd] supervisor started (DesiredState/ObservedState reconcile every 5s)");
 
     // start binary RPC server in background thread
     let binary_mgr = runtime_mgr.clone();

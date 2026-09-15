@@ -117,4 +117,38 @@ impl AgentSession {
             name: None,
         });
     }
+
+    // Handoff: Bot -> Session -> Runtime separation
+    // Allow transferring runtime to new session or sharing runtime
+    pub fn handoff(&self, new_model: Option<String>) -> Self {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        Self {
+            id: AgentSessionId::new(),
+            runtime_id: self.runtime_id.clone(), // same runtime, new session
+            model: new_model.unwrap_or_else(|| self.model.clone()),
+            messages: vec![], // fresh messages, but could copy context
+            tool_state: self.tool_state.clone(),
+            cwd: self.cwd.clone(),
+            status: super::state::AgentStatus::Idle,
+            created_at: now,
+            updated_at: now,
+            goal: self.goal.clone(),
+        }
+    }
+
+    pub fn handoff_with_messages(&self, new_model: Option<String>, keep_last_n: usize) -> Self {
+        let mut new_sess = self.handoff(new_model);
+        // Keep last N messages for context
+        if keep_last_n > 0 && !self.messages.is_empty() {
+            let start = if self.messages.len() > keep_last_n { self.messages.len() - keep_last_n } else { 0 };
+            new_sess.messages = self.messages[start..].to_vec();
+        }
+        new_sess
+    }
+
+    pub fn transfer_runtime(&mut self, new_runtime_id: String) {
+        // Transfer session to new runtime (e.g., workbench -> task)
+        self.runtime_id = new_runtime_id;
+        self.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    }
 }

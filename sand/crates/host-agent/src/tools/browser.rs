@@ -3,7 +3,7 @@ use std::process::Command;
 
 // Browser tools now call browser-worker Node + Playwright via HTTP
 // browser-worker is expected to be running at 127.0.0.1:port from /tmp/browser-worker.port
-// If not running, tools will try to spawn it or return placeholder
+// If not running, tools will try to spawn it via sandd SpawnBackground with cgroup + display + profile
 
 fn get_browser_worker_port() -> Option<u16> {
     if let Ok(port_str) = std::env::var("BROWSER_WORKER_PORT") {
@@ -14,7 +14,6 @@ fn get_browser_worker_port() -> Option<u16> {
     let port_file = std::env::var("BROWSER_WORKER_PORT_FILE").unwrap_or_else(|_| "/tmp/browser-worker.port".to_string());
     if let Ok(content) = std::fs::read_to_string(&port_file) {
         if let Ok(port) = content.trim().parse::<u16>() {
-            // Check if port is actually listening
             if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
                 return Some(port);
             }
@@ -23,20 +22,55 @@ fn get_browser_worker_port() -> Option<u16> {
     None
 }
 
+fn get_runtime_workspace(runtime_id: &str) -> Option<String> {
+    let req = format!(r#"{{"method":"GetRuntime","id":"{}"}}"#, runtime_id);
+    if let Ok(resp) = raw_rpc(&req) {
+        if let Some(ws) = extract_field(&resp, "workspace") {
+            return Some(ws);
+        }
+    }
+    None
+}
+
 fn try_spawn_browser_worker(runtime_id: &str) -> Result<(), String> {
-    // Try to spawn browser-worker via sandd SpawnBackground
-    // Use a dedicated runtime or current runtime
+    // Ensure display first for headful Chrome via Xvfb
+    let _ = raw_rpc(&format!(r#"{{"method":"EnsureDisplay","id":"{}","width":1280,"height":720}}"#, runtime_id));
+    let display_resp = raw_rpc(&format!(r#"{{"method":"GetDisplay","id":"{}"}}"#, runtime_id)).unwrap_or_default();
+    let display = extract_field(&display_resp, "display").unwrap_or_else(|| ":99".to_string());
+
     let worker_path = "/home/user/openbot/sand/browser-worker/src/index.js";
     if !std::path::Path::new(worker_path).exists() {
         return Err(format!("worker path not found: {}", worker_path));
     }
-    let req = format!(r#"{{"method":"SpawnBackground","id":"{}","command":["node","{}"]}}"#, runtime_id, worker_path);
+
+    // Chrome profile per runtime workspace
+    let profile_dir = if let Some(ws) = get_runtime_workspace(runtime_id) {
+        format!("{}/chrome-profile", ws)
+    } else {
+        format!("/tmp/chrome-profile-{}", runtime_id)
+    };
+    let _ = std::fs::create_dir_all(&profile_dir);
+
+    // Spawn with DISPLAY and CHROME_PROFILE env
+    // Use SpawnBackground via sandd so it's in runtime cgroup
+    let req = format!(r#"{{"method":"SpawnBackground","id":"{}","command":["sh","-lc","DISPLAY={} CHROME_PROFILE={} BROWSER_WORKER_PORT_FILE=/tmp/browser-worker-{}.port node {}"]}}"#, runtime_id, display, profile_dir, runtime_id, worker_path);
     match raw_rpc_spawn(&req) {
         Ok(resp) => {
             if resp.contains("\"ok\":true") {
-                // Wait for port file
+                // Wait for port file specific to this runtime
+                let port_file = format!("/tmp/browser-worker-{}.port", runtime_id);
                 for _ in 0..20 {
                     std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Ok(content) = std::fs::read_to_string(&port_file) {
+                        if let Ok(port) = content.trim().parse::<u16>() {
+                            if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                                // Also write to global port file for backward compat
+                                let _ = std::fs::write("/tmp/browser-worker.port", content);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    // Also check global
                     if get_browser_worker_port().is_some() {
                         return Ok(());
                     }
@@ -50,7 +84,7 @@ fn try_spawn_browser_worker(runtime_id: &str) -> Result<(), String> {
     }
 }
 
-fn raw_rpc_spawn(req: &str) -> Result<String, String> {
+fn raw_rpc(req: &str) -> Result<String, String> {
     use std::os::unix::net::UnixStream;
     use std::io::{Write, BufRead, BufReader};
     let sock_path = if std::path::Path::new("/run/sand/sandd.sock").exists() { "/run/sand/sandd.sock" } else { "/tmp/sandd/sandd.sock" };
@@ -60,6 +94,10 @@ fn raw_rpc_spawn(req: &str) -> Result<String, String> {
     let mut line = String::new();
     reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
     Ok(line.trim().to_string())
+}
+
+fn raw_rpc_spawn(req: &str) -> Result<String, String> {
+    raw_rpc(req)
 }
 
 fn call_browser_worker(endpoint: &str, method: &str, body: Option<&str>) -> Result<String, String> {

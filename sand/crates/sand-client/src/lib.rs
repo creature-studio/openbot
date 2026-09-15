@@ -178,6 +178,21 @@ impl SandClient {
         let req = format!(r#"{{"method":"ReadPty","id":"{}","pty_id":"{}","clear":{}}}"#, id, pty_id, clear);
         self.call_binary(&req, None)
     }
+
+    pub fn signal_pty(&self, id: &str, pty_id: &str, signal: i32) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"SignalPty","id":"{}","pty_id":"{}","signal":{}}}"#, id, pty_id, signal);
+        self.call(&req)
+    }
+
+    pub fn signal_pty_str(&self, id: &str, pty_id: &str, signal_str: &str) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"SignalPty","id":"{}","pty_id":"{}","signal_str":"{}"}}"#, id, pty_id, signal_str);
+        self.call(&req)
+    }
+
+    pub fn set_pty_raw(&self, id: &str, pty_id: &str, raw: bool) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"SetPtyRaw","id":"{}","pty_id":"{}","raw":{}}}"#, id, pty_id, raw);
+        self.call(&req)
+    }
 }
 
 fn extract_number_field(s: &str, field: &str) -> Option<u64> {

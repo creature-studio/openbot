@@ -25,9 +25,16 @@ pub fn default_tool_registry() -> ToolRegistry {
     registry.register(tools::fs::FsSearchTool);
     registry.register(tools::fs::FsStatTool);
     registry.register(tools::fs::FsPatchTool);
+    registry.register(tools::fs::FsMkdirTool);
+    registry.register(tools::fs::FsRemoveTool);
+    registry.register(tools::fs::FsRenameTool);
+    registry.register(tools::fs::FsGlobTool);
     registry.register(tools::terminal::TerminalOpenTool::new());
     registry.register(tools::terminal::TerminalWriteTool::new());
     registry.register(tools::terminal::TerminalReadTool::new());
+    registry.register(tools::terminal_signal::TerminalResizeTool::new());
+    registry.register(tools::terminal_signal::TerminalSignalTool::new());
+    registry.register(tools::terminal_signal::TerminalCloseTool::new());
     registry.register(tools::browser::BrowserOpenTool);
     registry.register(tools::browser::BrowserSnapshotTool);
     registry.register(tools::browser::BrowserClickTool);

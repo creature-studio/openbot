@@ -1,7 +1,7 @@
-# Phase 3 Progress - Host-Agent + Real PTY + SQLite + FS + Browser + Computer + Binary RPC + Desktop + Workbench
+# Phase 3 Progress - Host-Agent + Real PTY + SQLite + FS + Browser + Computer + Binary RPC + Desktop + Workbench + Supervisor
 
 ## Summary
-From Phase 0-2 (sandd kernel) to Phase 3A-E (Bot brain) with binary RPC and desktop manager.
+From Phase 0-2 (sandd kernel) to Phase 3A-E (Bot brain) with binary RPC, desktop manager, supervisor, full FS, PTY Ctrl handling, Bot->Session->Runtime handoff.
 
 **Before:**
 ```
@@ -10,167 +10,158 @@ sandd: Runtime/Process/Exec/PTY/cgroup (pipe fallback, JSON state, 777)
 
 **After:**
 ```
-Chat/App -> host-agent (Session/Loop/Tools/Attention/Task/Workbench) -> sandd (real PTY, SQLite WAL, 0660, SO_PEERCRED, binary RPC, DesktopManager Xvfb) + browser-worker (Playwright) + computer (X11 via sandd)
+Chat/App -> Bot (long-lived) -> Session (Conversation, handoff) -> Runtime (cgroup, Xvfb, Chrome profile)
+            host-agent Loop (freeze on ReadyForCheck/Permission) -> sandd (real PTY TERM/ANSI/resize/Ctrl, SQLite WAL, 0660, SO_PEERCRED, binary RPC, DesktopManager, Supervisor) + browser-worker (Playwright, profile, cgroup) + computer (X11 via sandd)
 ```
 
 ## What was done in this continuation (Phase 3B-E+)
 
-### 1. Real PTY (Phase 3B must-fix)
+### 1. Real PTY (Phase 3B must-fix) - enhanced
 - Rewrote `pty.rs` from pipe fallback to real `openpty + fork + setsid + ioctl(TIOCSCTTY) + dup2 + execvp`
 - Correct fd ownership via `dup`, reader/writer/waiter threads, ring buffer 1MB, `ReadPty` RPC
 - `tty` returns `/dev/pts/0`, ANSI, interactive, resize works
+- TERM=xterm-256color set in child, ANSI enabled
+- Resize: `ioctl TIOCSWINSZ` + `kill SIGWINCH (28)`
+- Raw mode: `SetPtyRaw` RPC (placeholder for tcsetattr), but PTY already handles raw bytes via WritePty
+- Ctrl+C/D: `SignalPty` RPC (SIGINT 2, SIGTERM 15, etc) + raw byte handling:
+  - Ctrl+C = 0x03 via WritePty binary or SignalPty SIGINT
+  - Ctrl+D = 0x04 EOF via WritePty binary
+  - Verified: `cat` + Ctrl+C 0x03 -> "^C" and terminates, `sleep 10` + SignalPty 2 -> terminates
 - Fallback to pipe if openpty fails
+- New tools: `terminal.resize`, `terminal.signal`, `terminal.close` (33 tools total)
 
 ### 2. UDS Security 777 -> 0660 + SO_PEERCRED
 - `rpc.rs` chmod 0660, chgrp sand, `getsockopt(SO_PEERCRED)` logs pid/uid/gid
-- Future enforcement planned
 
-### 3. SQLite WAL (Phase 1 planned, now done)
-- Implemented `state_sqlite.rs` via direct FFI to `libsqlite3` (no external crate, works offline)
-- `#[link(name = "sqlite3")]` with symlink fix
-- PRAGMA journal_mode=WAL, synchronous=NORMAL
-- Tables: runtime, process, pty, session, task, event (no FK cascade to avoid session deletion on runtime destroy)
-- StateManager uses SQLite primary + JSON fallback, verified .db-wal/.db-shm exist, python sqlite3 query works
-- host-agent `persistence.rs` same DB `/run/sand/state.db`, session survives runtime destroy
+### 3. SQLite WAL
+- FFI to libsqlite3, WAL, tables runtime/process/pty/session/task/event (no FK cascade)
+- StateManager SQLite primary + JSON fallback, host-agent persistence same DB
+- session survives runtime destroy verified
 
-### 4. FS via sandd (Phase 3B) - now direct workspace + exec fallback
-- `file.read/write/list/search/stat/patch` now:
-  - Try direct FS via runtime workspace path (GetRuntime workspace + std::fs) for efficiency
-  - Fallback to sandd exec `cat/ls/stat`
-  - Fallback to local FS
-- `file.patch` supports search/replace and unified diff
-- Verified via `read_file_via_workspace`, `write_file_via_workspace_direct`, `list_via_workspace`
+### 4. FS via sandd - now full set
+- Before: read/write/list/search/stat/patch via exec
+- Now:
+  - Direct workspace FS via GetRuntime workspace + std::fs for efficiency
+  - Fallback to exec + local
+  - New tools:
+    - `file.mkdir` (mkdir -p) via workspace + exec
+    - `file.remove` (rm -rf) with permission check refusing dangerous path, via workspace + exec
+    - `file.rename` (mv) via workspace + exec
+    - `file.glob` (find + glob) via exec
+  - Total file tools: read/write/list/search/stat/patch/mkdir/remove/rename/glob = 10
+- `file.patch` search/replace + unified diff
 
 ### 5. Permission + Attention + Task Freeze
-- `AgentContext` has Allow/Ask/Deny map
-- `shell.exec` detects destructive `rm -rf /`, `mkfs`, `dd`, etc -> returns `permission_required` which triggers `Attention::PermissionRequired` in loop and freezes (WaitingInput)
-- `task.complete` marks task ReadyForCheck in SQLite, freezes agent loop, emits `Attention::ReadyForCheck`, runtime kept until approval
-- Loop logic: `should_freeze` on task.complete or permission_required, returns ReadyForCheck/WaitingInput
+- `shell.exec` detects destructive `rm -rf /`, `mkfs`, `dd`, etc -> `permission_required` -> Attention::PermissionRequired + freeze to WaitingInput
+- `file.remove` also checks dangerous path
+- `task.complete` updates SQLite to ReadyForCheck, freezes loop to ReadyForCheck, emits Attention
+- Loop: should_freeze on task.complete or permission_required
 
-### 6. Binary RPC (new, efficient, no base64)
-- Added `rpc_binary.rs` listening on `/run/sand/sandd-binary.sock` (0660)
-- Framed protocol: 4-byte BE len + JSON header + binary payload
-- Methods:
-  - Exec: returns stdout_len/stderr_len + binary payload = stdout+stderr raw (no base64)
-  - WritePty: binary payload is data to write (no base64)
-  - ReadPty: returns len + raw bytes
-  - Screenshot: returns len + png bytes
-  - Delegates other methods to JSON handler
-- `sand-client` now has `call_binary`, `exec_binary`, `write_pty_binary`, `read_pty_binary`
-- host-agent tools updated to use binary RPC first, fallback to JSON:
-  - `shell.exec` uses `exec_binary` (shows "binary RPC, X bytes, no base64")
-  - `terminal.write/read` uses binary RPC
-  - `computer.screenshot` uses binary Screenshot via sandd
-- Test: `echo hello binary` via binary RPC returns 13 bytes raw, no base64 overhead
+### 6. Binary RPC (no base64)
+- `rpc_binary.rs` on `/run/sand/sandd-binary.sock` (0660), framed 4-byte BE len + JSON + binary
+- Exec: stdout_len/stderr_len + raw bytes, WritePty: raw bytes, ReadPty: raw bytes, Screenshot: png bytes
+- `sand-client`: call_binary, exec_binary, write/read pty binary, signal_pty, set_pty_raw
+- host-agent uses binary first, fallback JSON
+- Verified efficient
 
-### 7. DesktopManager Xvfb (Phase 3D)
-- New `desktop.rs` module:
-  - Manages Xvfb per runtime, allocates display :10-99 based on runtime_id hash
-  - `ensure_display(runtime_id, width, height)` starts Xvfb if available, reuses if exists
-  - `get_display`, `screenshot` via import/scrot/xwd fallback, `destroy` kills Xvfb
-  - Integrated into RuntimeManager, destroys on runtime destroy
-  - RPC: `EnsureDisplay`, `GetDisplay`, `Screenshot` (binary)
-- host-agent computer tools now try sandd desktop first:
-  - `computer.screenshot` calls EnsureDisplay + Screenshot binary RPC
-  - `computer.click/type` tries GetDisplay + exec xdotool in runtime with DISPLAY set
-  - Fallback to local xdotool/import
+### 7. DesktopManager Xvfb
+- `desktop.rs`: Xvfb per runtime, display :10-99 hashed, ensure_display, get_display, screenshot via import/scrot/xwd, destroy kills Xvfb
+- Integrated into RuntimeManager, RPC EnsureDisplay/GetDisplay/Screenshot (binary)
+- computer tools use sandd desktop first
 
-### 8. Computer Use (Phase 3D) - now via sandd
-- `computer.screenshot/click/type/move/key/scroll`:
-  - Try sandd binary RPC (EnsureDisplay + Screenshot)
-  - Try runtime exec with DISPLAY (xdotool)
-  - Try local xdotool/import
-  - Else placeholder with architecture doc
-- Architecture: Browser snapshot first, screenshot+vision+mouse fallback
+### 8. Computer Use via sandd
+- screenshot via EnsureDisplay+Screenshot binary, click/type via GetDisplay+exec xdotool in runtime with DISPLAY
+- Fallback to local xdotool/import
+- Browser-first fallback documented
 
-### 9. Browser Worker (Phase 3C)
-- `browser-worker/` Node + Playwright
-- HTTP server: /open, /snapshot (accessibility tree -> `[ref] role "name"`), /click, /fill, /press, /scroll, /screenshot, /tabs
-- Port discovery via `/tmp/browser-worker.port` + env
-- host-agent auto-spawn via sandd SpawnBackground
-- Snapshot design: semantic refs, not selectors
+### 9. Browser Worker lifecycle managed by sandd cgroup
+- `browser.rs` improved:
+  - EnsureDisplay first for headful Chrome via Xvfb
+  - Chrome profile per runtime workspace: `{workspace}/chrome-profile` or `/tmp/chrome-profile-{runtime_id}`
+  - Spawn via sandd SpawnBackground with `DISPLAY=... CHROME_PROFILE=... BROWSER_WORKER_PORT_FILE=/tmp/browser-worker-{runtime_id}.port node index.js`
+  - Port file per runtime + global fallback, waits 10s, writes global port file for compat
+  - Now managed by sandd cgroup (process in runtime cgroup, killed on destroy)
+  - Profile isolation per runtime
 
-### 10. Event Bus + SubscribeEvents
-- `events.rs` now has subscribers: `Vec<Sender<RuntimeEvent>>` + `emit` broadcasts
-- `subscribe()` returns Receiver
-- RPC `ListEvents` returns last 100 events, `SubscribeEvents` streams via JSON-line (keeps connection open, sends events as they occur)
-- Binary RPC also supports ListEvents
+### 10. Event Bus + SubscribeEvents + Supervisor Desired/Observed
+- `events.rs`: broadcast via mpsc Sender, subscribe()
+- RPC ListEvents (last 100), SubscribeEvents streaming
+- `supervisor.rs`: DesiredState {runtime_id, kind, should_exist, should_running, min_procs}, ObservedState {exists, running, procs, ptys}, set_desired, get_observed, reconcile (every 5s loop), logs actions, destroys if should_exist false
+- RPC SetDesiredState, GetObservedState
+- Verified: SetDesiredState + GetObservedState works
 
-### 11. Task + Attention + Recovery + Workbench
-- `Task` struct + tools: `task.create`, `task.complete` (updates SQLite to ReadyForCheck), `task.list` (python sqlite3 query)
-- `WorkbenchManager` long-lived runtime kind Workbench, ensures display, persists across sessions
-- Session persistence via SQLite, survives destroy
+### 11. Bot -> Session -> Runtime handoff
+- `session.rs`: `handoff()`, `handoff_with_messages(keep_last_n)`, `transfer_runtime(new_runtime_id)`
+- `api/mod.rs`: Bot struct {id, sessions, workbench_id}, HostAgentApi now has workbench_mgr + bots, methods:
+  - create_bot()
+  - create_session()
+  - create_session_with_runtime(runtime_id, model) for reuse
+  - create_session_in_workbench() long-lived
+  - handoff_session(old, new_model)
+  - ensure_workbench()
+- Separation: Bot is long-lived, Session per conversation, Runtime per execution env, supports handoff (same runtime new session)
 
-### 12. Tool Registry Separation
-- Agent Tool API vs sandd Runtime API separated
-- `default_tool_registry()` registers 26 tools: shell.exec (binary), file.*, terminal.* (binary), browser.*, computer.* (via sandd), task.*
+### 12. Workbench long-lived
+- WorkbenchManager ensures workbench runtime exists, finds existing workbench from list, creates if not, ensures display
+- host-agent can create session in workbench via create_session_in_workbench
+
+### 13. Tool Registry
+- 33 tools: shell.exec (binary), file.read/write/list/search/stat/patch/mkdir/remove/rename/glob (10), terminal.open/write/read/resize/signal/close (6), browser.open/snapshot/click/fill/screenshot/tabs/press (7), computer.screenshot/click/type/move/key/scroll (6), task.create/complete/list (3)
 
 ## Test Results
 
 ### sandd
-- Real PTY tty -> /dev/pts/0, SQLite WAL, UDS 0660, binary RPC on sandd-binary.sock
-- `ListRuntimes`, `CreateRuntime`, `Exec` via binary RPC works (echo hello binary -> 13 bytes raw)
-- PTY open/write/read via binary RPC works
-- EnsureDisplay + Screenshot via binary (when Xvfb available)
+- Real PTY: tty /dev/pts/0, TERM xterm-256color, ANSI, resize ioctl+SIGWINCH, Ctrl+C 0x03 -> "^C", Ctrl+D 0x04 EOF, SignalPty SIGINT works
+- Binary RPC: Exec raw, WritePty raw, ReadPty raw, Screenshot raw
+- DesktopManager: EnsureDisplay starts Xvfb if available
+- Supervisor: SetDesiredState/GetObservedState, reconcile every 5s
+- SQLite WAL, UDS 0660, SO_PEERCRED
 
 ### host-agent
-- `./target/debug/host-agent run` uses binary RPC for exec (shows "binary RPC, 403 bytes, no base64")
-- FS via workspace direct (file.read shows "via workspace")
-- Permission: `rm -rf /` returns `permission_required: destructive command ... [tool: shell.exec]` -> triggers Attention::PermissionRequired and freezes
-- Task complete: marks SQLite task ReadyForCheck, freezes loop
-- Tools: 26 tools, all use sandd when possible
-
-### Tools list
-```
-shell.exec (binary RPC), file.read/write/list/search/stat/patch (workspace direct + exec), terminal.open/write/read (binary RPC), browser.open/snapshot/click/fill/press/tabs/screenshot (auto-spawn), computer.screenshot/click/type/move/key/scroll (via sandd desktop + binary), task.create/complete/list (SQLite)
-```
+- run uses binary RPC (403 bytes no base64), FS via workspace direct
+- Permission: rm -rf / -> permission_required, freezes
+- Task complete: ReadyForCheck in SQLite, freezes
+- FS tools: mkdir/remove/rename/glob via workspace
+- Terminal: open with cols/rows, write raw Ctrl+C/D, resize, signal, close
+- Browser: spawn via sandd with display+profile+cgroup, port file per runtime
 
 ## Architecture Now
 
 ```
-                     Chat / App
-                         │
-                         ▼
-                  ┌─────────────┐
-                  │ host-agent  │ SQLite WAL
-                  │ Loop (freeze on ReadyForCheck/Permission)│
-                  │ Session     │  Task (ReadyForCheck) + Workbench (long-lived)
-                  │ Tools (binary RPC)│
-                  │ Permission  │
-                  └──────┬──────┘
-                         │
-             ┌───────────┴─────────────┐
-             │                         │
-             ▼                         ▼
-      Browser Worker                 sandd
-       Playwright                      │
-             │                         ├─ Runtime (SQLite WAL)
-             │                         ├─ Exec (binary RPC, no base64)
-             └──────── Chrome ◀────────┤
-                                       ├─ PTY (real forkpty, binary RPC)
-                                       ├─ FS (direct workspace + exec)
-                                       ├─ cgroup
-                                       ├─ State (WAL)
-                                       ├─ DesktopManager (Xvfb per runtime)
-                                       ├─ Screenshot (binary RPC)
-                                       └─ Events (broadcast + SubscribeEvents)
+Chat/App -> Bot (long-lived, sessions, workbench)
+            │
+            ▼
+      HostAgentApi -> Session (handoff, transfer_runtime) -> Runtime (cgroup, Xvfb, chrome-profile)
+            │
+            ├─ Loop (freeze on ReadyForCheck/Permission, Attention)
+            ├─ Tools (33, binary RPC, workspace direct)
+            └─ WorkbenchManager (long-lived)
+            │
+            ├─ Browser Worker (Playwright, profile per runtime, cgroup managed, Xvfb display)
+            └─ sandd
+               ├─ Runtime (SQLite WAL)
+               ├─ Exec (binary RPC no base64)
+               ├─ PTY (real forkpty, TERM xterm-256color, ANSI, resize TIOCSWINSZ+SIGWINCH, raw mode, CtrlC 0x03 CtrlD 0x04, SignalPty)
+               ├─ FS (direct workspace + exec)
+               ├─ cgroup
+               ├─ State (WAL)
+               ├─ DesktopManager (Xvfb per runtime)
+               ├─ Screenshot (binary)
+               ├─ Events (broadcast + SubscribeEvents)
+               └─ Supervisor (Desired/Observed reconcile)
 ```
 
 ## Build
 
 ```
-cargo build
-# sandd + sand + host-agent + sand-cli + sand-init
-# Finished dev profile 0.9s
-# Binary RPC: /run/sand/sandd.sock + /run/sand/sandd-binary.sock
+cargo build -> 0.9s, 33 tools, sandd + binary RPC
 ```
 
 ## Remaining for full Bot MVP
 
-- Browser worker as sandd managed process with cgroup lifecycle + Chrome profile / CDP
-- Computer use native X11 FFI XShm/XTest (currently uses xdotool via runtime exec, which works when Xvfb+DISPLAY)
-- Supervisor DesiredState/ObservedState reconcile
-- Permission UI + Attention -> Workbench UI approval
-- Task artifacts freezing + release after approval
-- FS via sandd direct for all tools (already done for read/write/list, need search/stat/patch)
-- More event streaming via binary RPC (currently JSON-line)
+- Browser worker Chrome download fix (TLS), CDP integration, more semantic actions
+- Computer use native X11 FFI XShm/XTest (currently xdotool via runtime exec, works with Xvfb)
+- Task artifacts freezing + release after approval UI
+- Permission UI Workbench approval
+- FS search/stat/patch already via workspace, but glob could use direct glob crate
+- Event streaming via binary RPC (currently JSON-line, binary already supports)

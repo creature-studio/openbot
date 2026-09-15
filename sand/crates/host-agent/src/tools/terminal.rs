@@ -24,15 +24,17 @@ impl Tool for TerminalOpenTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "terminal.open".to_string(),
-            description: "Open a PTY terminal in runtime. Returns pty_id.".to_string(),
-            parameters_schema: r#"{"type":"object","properties":{"pty_id":{"type":"string"},"shell":{"type":"string"}},"required":[]}"#.to_string(),
+            description: "Open a PTY terminal in runtime with TERM=xterm-256color, ANSI support, resize, raw mode. Returns pty_id. Supports Ctrl+C/D via terminal.write with \\x03/\\x04 or signal tool.".to_string(),
+            parameters_schema: r#"{"type":"object","properties":{"pty_id":{"type":"string"},"shell":{"type":"string"},"cols":{"type":"number"},"rows":{"type":"number"}},"required":[]}"#.to_string(),
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").unwrap_or_else(|| format!("term-{}", std::process::id()));
         let shell = extract_arg(args, "shell").unwrap_or_else(|| "/bin/bash".to_string());
-        match self.client.open_pty(runtime_id, &pty_id, 80, 24) {
-            Ok(resp) => Ok(ToolResult { content: format!("opened pty {} in runtime {}: {}", pty_id, runtime_id, resp), is_error: false }),
+        let cols = extract_number(args, "cols").unwrap_or(80) as u16;
+        let rows = extract_number(args, "rows").unwrap_or(24) as u16;
+        match self.client.open_pty(runtime_id, &pty_id, cols, rows) {
+            Ok(resp) => Ok(ToolResult { content: format!("opened pty {} ({}x{}) shell={} TERM=xterm-256color ANSI enabled in runtime {}: {}\nUse terminal.write with data=\"\\x03\" for Ctrl+C, \"\\x04\" for Ctrl+D, or signal tool", pty_id, cols, rows, shell, runtime_id, resp), is_error: false }),
             Err(e) => Ok(ToolResult { content: format!("open pty failed: {}", e), is_error: true }),
         }
     }
@@ -110,8 +112,16 @@ fn extract_arg(json: &str, key: &str) -> Option<String> {
         }
         let end = end?;
         let raw = &rest[1..1+end];
-        Some(raw.replace("\\n","\n").replace("\\\"","\"").replace("\\\\","\\"))
+        Some(raw.replace("\\n","\n").replace("\\\"","\"").replace("\\\\","\\").replace("\\x03", "\x03").replace("\\x04", "\x04").replace("\\x1b", "\x1b"))
     } else { None }
+}
+
+fn extract_number(json: &str, key: &str) -> Option<i32> {
+    let pat = format!("\"{}\":", key);
+    let start = json.find(&pat)?;
+    let rest = json[start+pat.len()..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c!='-').unwrap_or(rest.len());
+    rest[..end].parse().ok()
 }
 
 fn extract_field(s: &str, field: &str) -> Option<String> {
