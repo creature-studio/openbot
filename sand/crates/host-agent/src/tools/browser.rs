@@ -202,12 +202,12 @@ impl Tool for BrowserOpenTool {
 
         // Try transport routing first
         if let Some(ctx) = ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::BrowserRequest {
                     runtime_id: runtime_id.to_string(),
                     action: BrowserAction::Open { url: url.clone() },
                 };
-                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                match super::context::block_on_transport(transport.browser_request(req)) {
                     Ok(spark_transport::BrowserResponse { error: None, .. }) => {
                         return Ok(ToolResult::success(format!("opened {} via transport in runtime {}", url, runtime_id)));
                     }
@@ -283,12 +283,12 @@ impl Tool for BrowserClickTool {
 
         // Try transport routing first
         if let Some(ctx) = _ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::BrowserRequest {
                     runtime_id: _runtime_id.to_string(),
                     action: BrowserAction::Click { selector: r.clone() },
                 };
-                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                match super::context::block_on_transport(transport.browser_request(req)) {
                     Ok(spark_transport::BrowserResponse { error: None, .. }) => {
                         return Ok(ToolResult::success(format!("clicked {} via transport", r)));
                     }
@@ -322,12 +322,12 @@ impl Tool for BrowserFillTool {
 
         // Try transport routing first
         if let Some(ctx) = _ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::BrowserRequest {
                     runtime_id: _runtime_id.to_string(),
                     action: BrowserAction::Fill { selector: r.clone(), value: value.clone() },
                 };
-                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                match super::context::block_on_transport(transport.browser_request(req)) {
                     Ok(spark_transport::BrowserResponse { error: None, .. }) => {
                         return Ok(ToolResult::success(format!("filled {} via transport", r)));
                     }
@@ -357,12 +357,12 @@ impl Tool for BrowserScreenshotTool {
     fn execute_with_context(&self, _args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         // Try transport routing first
         if let Some(ctx) = _ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::BrowserRequest {
                     runtime_id: _runtime_id.to_string(),
                     action: BrowserAction::Screenshot,
                 };
-                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                match super::context::block_on_transport(transport.browser_request(req)) {
                     Ok(spark_transport::BrowserResponse { snapshot: Some(data), error: None, .. }) => {
                         let b64 = base64_encode(&data);
                         return Ok(ToolResult::success(format!("screenshot via transport {} bytes, base64 length {}", data.len(), b64.len())));

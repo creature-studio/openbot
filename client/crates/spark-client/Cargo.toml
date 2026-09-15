@@ -13,6 +13,8 @@ spark-ui = { path = "../spark-ui" }
 spark-transport = { path = "../spark-transport" }
 spark-terminal = { path = "../spark-terminal" }
 gpui = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }

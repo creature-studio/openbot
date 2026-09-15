@@ -38,7 +38,6 @@
 
 use gpui::{
     div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
-    WindowContext,
 };
 use spark_model::*;
 use crate::stores::TaskStore;
@@ -50,7 +49,7 @@ pub struct TaskTimeline {
 }
 
 impl TaskTimeline {
-    pub fn new(tasks: Entity<TaskStore>, cx: &mut WindowContext) -> Self {
+    pub fn new(tasks: Entity<TaskStore>, cx: &mut ViewContext<Self>) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
 
         Self {

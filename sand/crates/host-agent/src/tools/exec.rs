@@ -1,5 +1,5 @@
 use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
-use sand_protocol::{ExecRequest, ExecResult};
+use spark_transport::ExecRequest;
 
 pub struct ShellExecTool {
     sand_client: sand_client::SandClient,
@@ -50,10 +50,10 @@ impl Tool for ShellExecTool {
 
         // Try routing through transport if context available
         if let Some(ctx) = ctx {
-            let machine_id = ctx.default_machine();
-            if let Some(transport) = ctx.transport_for(&machine_id) {
+            // The runtime decides the machine; the tool does not care which.
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let exec_req = ExecRequest {
-                    runtime_id: sand_protocol::RuntimeId::from_string(runtime_id.to_string()),
+                    runtime_id: runtime_id.to_string(),
                     command: vec!["bash".to_string(), "-lc".to_string(), command.clone()],
                     cwd: None,
                     env: std::collections::HashMap::new(),
@@ -61,8 +61,7 @@ impl Tool for ShellExecTool {
                     stdin_data: None,
                 };
                 // Use tokio runtime to block on async call
-                let result = tokio::runtime::Handle::current()
-                    .block_on(transport.exec(exec_req));
+                let result = super::context::block_on_transport(transport.exec(exec_req));
                 if let Ok(result) = result {
                     let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
                     let content = format!("exit_code: {}\nstdout (transport, {} bytes):\n{}\nstderr:\n{}",
@@ -79,10 +78,19 @@ impl Tool for ShellExecTool {
                     tool_result.duration_ms = duration;
                     return Ok(tool_result);
                 }
+                return Ok(super::ToolResult::error(
+                    format!(
+                        "exec failed on machine {}: {}",
+                        ctx.machine_for_runtime(runtime_id),
+                        result.err().map(|e| e.to_string()).unwrap_or_default()
+                    ),
+                    Some("EXEC_FAILED".to_string()),
+                ));
             }
         }
 
-        // Fallback: direct sand-client exec (local only)
+        // No machine registry (legacy CLI path): talk to the local sandd. This
+        // is the only place a tool touches SandClient directly.
         let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
         match self.sand_client.exec_binary(runtime_id, cmd_vec) {
             Ok((json_resp, stdout, stderr)) => {

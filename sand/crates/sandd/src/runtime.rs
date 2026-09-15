@@ -10,6 +10,10 @@ use crate::cgroup::CgroupManager;
 use crate::events::EventBus;
 use crate::process::ProcessManager;
 use crate::pty::PtyManager;
+use crate::browser::BrowserManager;
+use crate::computer::ComputerManager;
+use crate::browser::BrowserManager;
+use crate::computer::ComputerManager;
 use crate::desktop::DesktopManager;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +90,8 @@ pub struct RuntimeManager {
     pty_mgr: Arc<PtyManager>,
     proc_mgr: Arc<ProcessManager>,
     desktop_mgr: Arc<DesktopManager>,
+    browser_mgr: Arc<BrowserManager>,
+    computer_mgr: Arc<ComputerManager>,
 }
 
 impl RuntimeManager {
@@ -93,6 +99,11 @@ impl RuntimeManager {
         let pty_mgr = Arc::new(PtyManager::new());
         let proc_mgr = Arc::new(ProcessManager::new(cgroup_mgr.clone()));
         let desktop_mgr = Arc::new(DesktopManager::new());
+        // Browser and computer use share the runtime's desktop: Chrome renders
+        // into the runtime's Xvfb and computer use injects into the same
+        // display, so they must not each own a DesktopManager.
+        let browser_mgr = Arc::new(BrowserManager::new(desktop_mgr.clone()));
+        let computer_mgr = Arc::new(ComputerManager::new(desktop_mgr.clone()));
         Self {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -105,6 +116,8 @@ impl RuntimeManager {
             pty_mgr,
             proc_mgr,
             desktop_mgr,
+            browser_mgr,
+            computer_mgr,
         }
     }
 
@@ -136,6 +149,21 @@ impl RuntimeManager {
     }
 
     pub fn create_runtime(&self, kind: RuntimeKind, workspace: Option<PathBuf>) -> Result<Runtime, String> {
+        self.create_runtime_on_machine(kind, workspace, None)
+    }
+
+    /// Create a runtime and record which machine it lives on.
+    ///
+    /// `machine_id == None` means "this machine" — the id is derived from the
+    /// host fingerprint so that a runtime keeps the same machine id across
+    /// sandd restarts and reconnects.
+    pub fn create_runtime_on_machine(
+        &self,
+        kind: RuntimeKind,
+        workspace: Option<PathBuf>,
+        machine_id: Option<MachineId>,
+    ) -> Result<Runtime, String> {
+        let machine_id = machine_id.unwrap_or_else(sand_protocol::local_host_machine_id);
         let id = RuntimeId::new();
         let now = now_ms();
         let ws = workspace.unwrap_or_else(|| {
@@ -167,6 +195,7 @@ impl RuntimeManager {
             ],
             process_count: 0,
             pty_count: 0,
+            machine_id,
         };
 
         {
@@ -256,6 +285,11 @@ impl RuntimeManager {
             let mut runtimes = self.runtimes.lock().unwrap();
             runtimes.remove(&id.0);
         }
+        // Chrome + worker live in the runtime cgroup (already killed above);
+        // this releases manager bookkeeping and stops the runtime's Xvfb.
+        self.browser_mgr.destroy(&id.0);
+        self.desktop_mgr.destroy(&id.0);
+
         let _ = self.state_mgr.remove_runtime(id);
         self.event_bus.emit(id.clone(), RuntimeEventKind::Destroyed);
 
@@ -302,6 +336,14 @@ impl RuntimeManager {
 
     pub fn cgroup_manager(&self) -> Arc<CgroupManager> {
         self.cgroup_mgr.clone()
+    }
+
+    pub fn browser_manager(&self) -> Arc<BrowserManager> {
+        self.browser_mgr.clone()
+    }
+
+    pub fn computer_manager(&self) -> Arc<ComputerManager> {
+        self.computer_mgr.clone()
     }
 
     pub fn desktop_manager(&self) -> Arc<DesktopManager> {

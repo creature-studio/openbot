@@ -38,7 +38,7 @@ impl Tool for TerminalOpenTool {
         let rows = extract_number(args, "rows").unwrap_or(24) as u16;
         // Try transport routing first
         if let Some(ctx) = ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::PtyOpenRequest {
                     runtime_id: runtime_id.to_string(),
                     pty_id: pty_id.clone(),
@@ -46,7 +46,7 @@ impl Tool for TerminalOpenTool {
                     rows,
                     shell: shell.clone(),
                 };
-                match tokio::runtime::Handle::current().block_on(transport.open_pty(req)) {
+                match super::context::block_on_transport(transport.open_pty(req)) {
                     Ok(()) => {
                         return Ok(ToolResult::success(format!("opened pty {} ({}x{}) shell={} via transport in runtime {}", pty_id, cols, rows, shell, runtime_id)));
                     }
@@ -79,13 +79,13 @@ impl Tool for TerminalWriteTool {
         let data = extract_arg(args, "data").ok_or("missing data")?;
         // Try transport routing first
         if let Some(ctx) = ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
                 let req = spark_transport::PtyWriteRequest {
                     runtime_id: runtime_id.to_string(),
                     pty_id: pty_id.clone(),
                     data: data.as_bytes().to_vec(),
                 };
-                match tokio::runtime::Handle::current().block_on(transport.write_pty(req)) {
+                match super::context::block_on_transport(transport.write_pty(req)) {
                     Ok(()) => {
                         return Ok(ToolResult::success(format!("write to {} via transport: ok", pty_id)));
                     }
@@ -127,8 +127,8 @@ impl Tool for TerminalReadTool {
         let clear = args.contains("\"clear\":true");
         // Try transport routing first
         if let Some(ctx) = ctx {
-            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
-                match tokio::runtime::Handle::current().block_on(transport.read_pty(runtime_id, &pty_id, clear)) {
+            if let Some(transport) = ctx.transport_for_runtime(runtime_id) {
+                match super::context::block_on_transport(transport.read_pty(runtime_id, &pty_id, clear)) {
                     Ok(resp) => {
                         return Ok(ToolResult::success(format!("pty {} output via transport ({} bytes): {}", pty_id, resp.data.len(), String::from_utf8_lossy(&resp.data))));
                     }

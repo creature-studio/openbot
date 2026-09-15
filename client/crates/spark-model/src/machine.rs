@@ -12,22 +12,97 @@
 //!        └─ Workbench
 //! ```
 //!
-//! MachineId is defined in sand-protocol (the shared protocol crate) and
-//! re-exported here. All other machine types are defined here.
+//! This crate is the *client* side of the model and deliberately does not
+//! depend on the `sand` workspace: `MachineId` is duplicated here (and in
+//! `sand-protocol`) as an opaque newtype. The two crates stay in sync through
+//! `machine_ids_match` / the "machine-local" constant rather than a shared
+//! dependency, which keeps the build graph of the GPUI client independent from
+//! the runtime kernel.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-// Re-export MachineId from sand-protocol — the single source of truth.
-pub use sand_protocol::MachineId;
+/// Opaque machine identifier.
+///
+/// * `machine-local` — the well known id of the machine running host-agent.
+/// * `mach-<hex>` — stable fingerprint id of a host (`/etc/machine-id` or
+///   hostname hashed), which is what remote machines report.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MachineId(pub String);
+
+/// Id of the machine that runs host-agent itself.
+pub const LOCAL_MACHINE_ID: &str = "machine-local";
+
+/// Fingerprint an arbitrary host seed into a machine id. Mirrors
+/// `sand_protocol::host_machine_id` so both sides agree on the same string.
+pub fn fingerprint_machine_id(seed: &str) -> MachineId {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in seed.trim().as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    MachineId(format!("mach-{:012x}", hash & 0xffff_ffff_ffff))
+}
+
+/// Opaque comparison that does not require the `sand` workspace: ids are only
+/// ever compared as strings.
+pub fn machine_ids_match(a: &MachineId, b: &MachineId) -> bool {
+    a.0 == b.0
+}
+
+impl MachineId {
+    /// Generate a fresh random id (used for ad-hoc machines in tests/UI).
+    pub fn new() -> Self {
+        Self(format!("mach-{}", uuid::Uuid::new_v4().simple()))
+    }
+
+    /// The local machine's well known id.
+    pub fn local() -> Self {
+        Self(LOCAL_MACHINE_ID.to_string())
+    }
+
+    pub fn from_string(s: String) -> Self {
+        Self(s)
+    }
+
+    /// Human label for the sidebar when nothing better is known.
+    pub fn short(&self) -> String {
+        if self.is_local() {
+            "Local".to_string()
+        } else {
+            self.0.clone()
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.0 == LOCAL_MACHINE_ID
+    }
+}
+
+impl Default for MachineId {
+    fn default() -> Self {
+        Self::local()
+    }
+}
+
+impl std::fmt::Display for MachineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MachineKind
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MachineKind {
+    #[default]
     /// The local machine where host-agent runs (and where sandd talks via UDS).
     Local,
 
@@ -59,6 +134,42 @@ impl MachineKind {
     pub fn is_local(&self) -> bool {
         matches!(self, MachineKind::Local)
     }
+
+    pub fn is_ssh(&self) -> bool {
+        matches!(self, MachineKind::Ssh { .. })
+    }
+
+    /// SSH target as it should be handed to `ssh(1)` on the command line.
+    /// The `~/.ssh/config` alias wins when present.
+    pub fn ssh_target(&self) -> Option<String> {
+        match self {
+            MachineKind::Local => None,
+            MachineKind::Ssh { host, user, ssh_config_host, .. } => Some(
+                ssh_config_host
+                    .clone()
+                    .unwrap_or_else(|| match user {
+                        Some(user) => format!("{}@{}", user, host),
+                        None => host.clone(),
+                    }),
+            ),
+        }
+    }
+
+    /// Port to pass to `ssh -p`, unless the alias already carries it.
+    pub fn ssh_port(&self) -> Option<u16> {
+        match self {
+            MachineKind::Local => None,
+            MachineKind::Ssh { port, ssh_config_host, .. } => {
+                if ssh_config_host.is_some() {
+                    None // resolved by ~/.ssh/config
+                } else if *port == 22 {
+                    None
+                } else {
+                    Some(*port)
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +191,11 @@ pub enum MachineStatus {
     Degraded,
     /// Could not reach the machine (SSH timeout, network error).
     Unreachable,
-    /// Permanent error (auth failure, host key mismatch requiring user action).
+    /// Permanent error (protocol mismatch, sandd failure).
     Error,
+    /// Only the user can move this forward: unknown host key, key mismatch,
+    /// authentication failure. Automatic reconnect must stop here.
+    RequiresUserAction,
 }
 
 impl MachineStatus {
@@ -94,11 +208,48 @@ impl MachineStatus {
             MachineStatus::Degraded => "degraded",
             MachineStatus::Unreachable => "unreachable",
             MachineStatus::Error => "error",
+            MachineStatus::RequiresUserAction => "requires_user_action",
         }
     }
 
     pub fn is_connected(&self) -> bool {
         matches!(self, MachineStatus::Connected | MachineStatus::Degraded)
+    }
+
+    /// True when retrying automatically would be pointless or harmful.
+    pub fn requires_user_action(&self) -> bool {
+        matches!(self, MachineStatus::RequiresUserAction)
+    }
+
+    /// Map an SSH/sandd failure onto a machine status.
+    ///
+    /// Auth failures and host-key problems are terminal until the user acts;
+    /// timeouts and connection resets are retryable.
+    pub fn from_ssh_error(message: &str) -> MachineStatus {
+        let lower = message.to_lowercase();
+        let needs_user = [
+            "permission denied",
+            "host key verification failed",
+            "remote host identification has changed",
+            "no such identity",
+            "offending key",
+            "too many authentication failures",
+            "authentication failed",
+        ];
+        if needs_user.iter().any(|needle| lower.contains(needle)) {
+            return MachineStatus::RequiresUserAction;
+        }
+        if lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("connection refused")
+            || lower.contains("could not resolve")
+            || lower.contains("no route to host")
+            || lower.contains("connection closed")
+            || lower.contains("broken pipe")
+        {
+            return MachineStatus::Unreachable;
+        }
+        MachineStatus::Error
     }
 }
 
@@ -125,6 +276,28 @@ pub struct MachineCapabilities {
 }
 
 impl MachineCapabilities {
+    /// Build capabilities from the feature list a remote sandd reported
+    /// (`Handshake.features`). A feature we do not recognise is simply off.
+    pub fn from_features(features: &[String], has_display: bool, gpu: bool) -> Self {
+        let has = |name: &str| features.iter().any(|f| f == name);
+        Self {
+            exec: has("exec"),
+            pty: has("pty"),
+            filesystem: has("fs"),
+            // Browser support needs a sandd that advertises it *and* is not a
+            // bare remote host; the remote side spawns Xvfb + Chrome itself.
+            browser: has("browser"),
+            computer_use: has("computer") && has_display,
+            desktop: has_display,
+            gpu,
+        }
+    }
+
+    pub fn with_gpu(mut self, gpu: bool) -> Self {
+        self.gpu = gpu;
+        self
+    }
+
     /// Default capabilities for a local machine (everything on).
     pub fn local() -> Self {
         Self {
@@ -265,28 +438,109 @@ impl Machine {
         }
     }
 
-    /// SSH command line for launching the bridge.
-    /// e.g. `ssh -T devbox` or `ssh -p 22 user@host`.
-    pub fn ssh_command(&self) -> Option<Vec<String>> {
-        match &self.kind {
-            MachineKind::Local => None,
-            MachineKind::Ssh { ssh_config_host, port, user, host } => {
-                let mut cmd = vec!["ssh".to_string()];
-                if let Some(alias) = ssh_config_host {
-                    // Use alias — ssh config resolves everything.
-                    cmd.push(alias.clone());
-                } else {
-                    if *port != 22 {
-                        cmd.push(format!("-p {}", port));
-                    }
-                    if let Some(user) = user {
-                        cmd.push(format!("{}@{}", user, host));
-                    } else {
-                        cmd.push(host.clone());
-                    }
-                }
-                Some(cmd)
-            }
+    /// Argument vector for `ssh(1)` **without** the remote command, e.g.
+    /// `["-T", "-p", "2222", "dev@10.0.0.42"]`.
+    ///
+    /// `~/.ssh/config`, `ssh-agent`, `known_hosts`, `ProxyJump` and
+    /// `ProxyCommand` are all honoured because we drive the system `ssh`
+    /// binary rather than reimplementing the protocol. Nothing here ever
+    /// disables host key checking.
+    pub fn ssh_args(&self) -> Option<Vec<String>> {
+        let target = self.kind.ssh_target()?;
+        let mut args = vec!["-T".to_string()];
+        if let Some(port) = self.kind.ssh_port() {
+            args.push("-p".to_string());
+            args.push(port.to_string());
+        }
+        args.push("-o".to_string());
+        args.push("BatchMode=yes".to_string());
+        args.push("--".to_string());
+        args.push(target);
+        Some(args)
+    }
+
+    /// The remote command that starts the bridge on the machine.
+    ///
+    /// Falls back from `sand bridge` to `sandd bridge` so that a machine which
+    /// only has the sandd binary bootstrapped still works.
+    pub fn bridge_remote_command(socket: &str) -> String {
+        let escaped = socket.replace('\'', "'\\''");
+        // Prefer the `sand` wrapper on PATH; fall back to the bootstrapped
+        // binaries, so a machine that only has sandd still works.
+        let candidates = [
+            "sand".to_string(),
+            "\"$HOME/.local/share/spark/current/sand\"".to_string(),
+            "\"$HOME/.local/share/spark/current/sandd\"".to_string(),
+        ];
+        let mut script = String::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let keyword = if index == 0 { "if" } else { "elif" };
+            script.push_str(&format!(
+                "{keyword} command -v {candidate} >/dev/null 2>&1; then {candidate} bridge --socket '{escaped}'; "
+            ));
+        }
+        script.push_str(
+            "else echo 'spark: no sand/sandd bridge binary on this machine' >&2; exit 127; fi",
+        );
+        script
+    }
+
+    /// Install layout on a machine (§十二): binaries live under
+    /// `~/.local/share/spark`, sockets under `~/.cache/spark/run`.
+    pub fn spark_paths() -> SparkPaths {
+        SparkPaths::default()
+    }
+
+    /// Refresh the volatile parts of a machine record after a successful ping.
+    pub fn touch(&mut self, latency_ms: u64) {
+        self.last_seen_at = Some(chrono::Utc::now());
+        self.metadata.latency_ms = Some(latency_ms);
+    }
+}
+
+/// Remote install layout.
+#[derive(Debug, Clone)]
+pub struct SparkPaths {
+    pub root: String,
+    pub current: String,
+    pub socket: String,
+    pub data: String,
+    pub log: String,
+}
+
+impl SparkPaths {
+    /// Directory that holds the daemon socket (created 0700 by bootstrap).
+    pub fn socket_dir(&self) -> String {
+        match self.socket.rsplit_once('/') {
+            Some((dir, _)) => dir.to_string(),
+            None => "~/.cache/spark/run".to_string(),
+        }
+    }
+
+    /// Log directory (`~/.local/state/spark`).
+    pub fn logs(&self) -> &str {
+        &self.log
+    }
+
+    /// Versioned directory for a sandd version.
+    pub fn version_dir(&self, version: &str) -> String {
+        format!("{}/versions/{}", self.root, version)
+    }
+
+    /// Where the machine's artifact cache lives (lazy artifact download).
+    pub fn artifacts_dir(&self) -> String {
+        format!("{}/artifacts", self.data)
+    }
+}
+
+impl Default for SparkPaths {
+    fn default() -> Self {
+        Self {
+            root: "~/.local/share/spark".to_string(),
+            current: "~/.local/share/spark/current".to_string(),
+            socket: "~/.cache/spark/run/sandd.sock".to_string(),
+            data: "~/.local/share/spark/data".to_string(),
+            log: "~/.local/state/spark".to_string(),
         }
     }
 }
@@ -295,7 +549,7 @@ impl Machine {
 // Machine connection parameters (for UI forms)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineConnection {
     /// Connection type: "local" or "ssh".
     pub kind: MachineKind,

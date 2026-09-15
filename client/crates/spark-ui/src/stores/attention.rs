@@ -101,6 +101,19 @@ impl AttentionStore {
         cx.notify();
     }
 
+    /// Raise a non-task error (a lost host-agent connection, a machine that is
+    /// unreachable). It is recoverable by design: nothing was destroyed.
+    pub fn raise_error(&mut self, task_id: &str, message: String, recoverable: bool, cx: &mut Context<Self>) {
+        self.set(
+            task_id.to_string(),
+            &Attention::ExecutionError {
+                error: message,
+                recoverable,
+            },
+            cx,
+        );
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.active = AttentionSnapshot::None;
         cx.notify();

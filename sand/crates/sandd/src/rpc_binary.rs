@@ -7,6 +7,12 @@ use std::collections::HashMap;
 use crate::runtime::RuntimeManager;
 use sand_protocol::{RuntimeId, RuntimeKind};
 
+/// Workspace root of a runtime, used to confine filesystem operations.
+fn runtime_workspace(mgr: &RuntimeManager, runtime_id: &str) -> Option<std::path::PathBuf> {
+    let id = RuntimeId::from_string(runtime_id.to_string());
+    mgr.get_runtime(&id).map(|rt| rt.workspace)
+}
+
 pub struct BinaryRpcServer {
     sock_path: PathBuf,
     runtime_mgr: Arc<RuntimeManager>,
@@ -214,10 +220,54 @@ fn handle_binary_request(req_json: &str, binary_payload: Vec<u8>, mgr: &RuntimeM
                 Err(e) => (format!(r#"{{"ok":false,"error":"{}"}}"#, escape_json(&e)), vec![]),
             }
         }
-        "OpenPty" | "ResizePty" | "ClosePty" | "ListPtys" | "CreateRuntime" | "GetRuntime" | "ListRuntimes" | "DestroyRuntime" | "Status" | "SpawnBackground" | "ListEvents" | "EnsureDisplay" | "GetDisplay" | "SignalPty" | "SetDesiredState" | "GetObservedState" | "AcquireLease" | "ReleaseLease" | "ListLeases" | "TaskComplete" => {
+        "OpenPty" | "ResizePty" | "ClosePty" | "ListPtys" | "CreateRuntime" | "GetRuntime" | "ListRuntimes" | "DestroyRuntime" | "Status" | "SpawnBackground" | "ListEvents" | "EnsureDisplay" | "GetDisplay" | "SignalPty" | "SetDesiredState" | "GetObservedState" | "AcquireLease" | "ReleaseLease" | "ListLeases" | "TaskComplete" | "FsList" | "FsStat" | "FsSearch" | "FsGlob" | "FsMkdir" | "FsRemove" | "FsRename" | "FsPatch" | "Handshake" | "Ping" => {
             // For these, delegate to existing JSON handler (no binary)
             let json_resp = crate::rpc::handle_request_public(req_json, mgr);
             (json_resp, vec![])
+        }
+        // Raw file bytes: no base64 on the wire. The response declares `len`
+        // so the bridge/client knows how many bytes follow the JSON.
+        "FsRead" => {
+            let id_str = extract_string_field(req_json, "id").unwrap_or_default();
+            let path = extract_string_field(req_json, "path").unwrap_or_default();
+            let root = match runtime_workspace(mgr, &id_str) {
+                Some(ws) => ws,
+                None => return (r#"{"ok":false,"error":"runtime not found"}"#.to_string(), vec![]),
+            };
+            match crate::fs::read(&root, &path) {
+                Ok(data) => {
+                    let json = format!(r#"{{"ok":true,"len":{}}}"#, data.len());
+                    (json, data)
+                }
+                Err(e) => (
+                    format!(r#"{{"ok":false,"security":{},"error":"{}"}}"#, e.security, escape_json(&e.message)),
+                    vec![],
+                ),
+            }
+        }
+        "FsWrite" => {
+            let id_str = extract_string_field(req_json, "id").unwrap_or_default();
+            let path = extract_string_field(req_json, "path").unwrap_or_default();
+            // binary_payload carries the file content; `data_b64` is accepted as
+            // a fallback for callers on the JSON socket.
+            let data = if !binary_payload.is_empty() {
+                binary_payload
+            } else {
+                extract_string_field(req_json, "data_b64")
+                    .map(|b64| base64_decode(&b64))
+                    .unwrap_or_default()
+            };
+            let root = match runtime_workspace(mgr, &id_str) {
+                Some(ws) => ws,
+                None => return (r#"{"ok":false,"error":"runtime not found"}"#.to_string(), vec![]),
+            };
+            match crate::fs::write(&root, &path, &data) {
+                Ok(len) => (format!(r#"{{"ok":true,"bytes_written":{}}}"#, len), vec![]),
+                Err(e) => (
+                    format!(r#"{{"ok":false,"security":{},"error":"{}"}}"#, e.security, escape_json(&e.message)),
+                    vec![],
+                ),
+            }
         }
         "Screenshot" => {
             let id_str = extract_string_field(req_json, "id").unwrap_or_default();
@@ -278,4 +328,52 @@ fn extract_number_field(s: &str, field: &str) -> Option<u64> {
 
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+fn base64_decode(s: &str) -> Vec<u8> {
+    let mut table = [255u8; 256];
+    for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+        table[c as usize] = i as u8;
+    }
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let mut vals = [0u8; 4];
+        let mut padding = 0;
+        let mut valid = true;
+        for j in 0..4 {
+            let b = bytes[i + j];
+            if b == b'=' {
+                padding += 1;
+                vals[j] = 0;
+            } else {
+                let v = table[b as usize];
+                if v == 255 {
+                    valid = false;
+                    break;
+                }
+                vals[j] = v;
+            }
+        }
+        if !valid {
+            break;
+        }
+        let n = ((vals[0] as u32) << 18)
+            | ((vals[1] as u32) << 12)
+            | ((vals[2] as u32) << 6)
+            | (vals[3] as u32);
+        out.push(((n >> 16) & 0xFF) as u8);
+        if padding < 2 {
+            out.push(((n >> 8) & 0xFF) as u8);
+        }
+        if padding < 1 {
+            out.push((n & 0xFF) as u8);
+        }
+        i += 4;
+        if padding > 0 {
+            break;
+        }
+    }
+    out
 }

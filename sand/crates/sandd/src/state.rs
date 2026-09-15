@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::{Write, BufRead};
 use std::collections::HashMap;
-use sand_protocol::{RuntimeId, Runtime, RuntimeKind, RuntimeState, now_ms};
+use sand_protocol::{MachineId, RuntimeId, Runtime, RuntimeKind, RuntimeState, now_ms};
 
 use crate::state_sqlite::SqliteState;
 
@@ -38,6 +38,16 @@ impl StateManager {
         Self { path, sqlite }
     }
 
+    /// Apply additive schema migrations. SQLite has no
+    /// `ADD COLUMN IF NOT EXISTS`, so a duplicate-column error is expected and
+    /// ignored on databases that already have the column.
+    pub fn ensure_schema(&self) -> std::io::Result<()> {
+        if let Some(sqlite) = &self.sqlite {
+            let _ = sqlite.ensure_column("runtime", "machine_id", "TEXT");
+        }
+        Ok(())
+    }
+
     pub fn save_runtime(&self, rt: &Runtime) -> std::io::Result<()> {
         if let Some(sqlite) = &self.sqlite {
             let caps = rt.capabilities.join(",");
@@ -55,6 +65,7 @@ impl StateManager {
                 &caps,
                 rt.process_count,
                 rt.pty_count,
+                rt.machine_id.as_str(),
             ) {
                 eprintln!("[state] sqlite save failed: {}, fallback to json", e);
                 let mut runtimes = self.load_all_json().unwrap_or_default();
@@ -110,6 +121,11 @@ impl StateManager {
                             capabilities: if row.capabilities.is_empty() { vec![] } else { row.capabilities.split(',').map(|s| s.to_string()).collect() },
                             process_count: row.procs,
                             pty_count: row.ptys,
+                            machine_id: row
+                                .machine_id
+                                .clone()
+                                .map(MachineId::from_string)
+                                .unwrap_or_else(sand_protocol::local_host_machine_id),
                         };
                         map.insert(row.id, rt);
                     }
@@ -163,6 +179,9 @@ impl StateManager {
                     RuntimeState::Running
                 };
 
+                let machine_id = extract_field(&line, "machine_id")
+                    .map(MachineId::from_string)
+                    .unwrap_or_else(sand_protocol::local_host_machine_id);
                 let rt = Runtime {
                     id: RuntimeId::from_string(id.clone()),
                     kind,
@@ -174,6 +193,7 @@ impl StateManager {
                     capabilities: vec![],
                     process_count: 0,
                     pty_count: 0,
+                    machine_id,
                 };
                 map.insert(id, rt);
             }

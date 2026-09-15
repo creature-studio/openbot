@@ -14,7 +14,6 @@
 
 use gpui::{
     div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
-    WindowContext,
 };
 use spark_model::TaskId;
 use crate::stores::TaskStore;
@@ -37,7 +36,7 @@ impl Composer {
     pub fn new(
         tasks: Entity<TaskStore>,
         connection: Entity<ConnectionStore>,
-        cx: &mut WindowContext,
+        cx: &mut ViewContext<Self>,
     ) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
 

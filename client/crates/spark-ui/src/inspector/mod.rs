@@ -14,13 +14,14 @@
 //! - Browser: screenshot stream + DOM snapshot + interaction overlay
 //! - Files: changed files list + diff viewer
 //! - Terminal: terminal output
-//! - Runtime: runtime info (future)
+//! - Runtime: which machine the selected runtime lives on, and that machine's
+//!   host / OS / CPU / memory / GPU / sandd version / latency
 
 use gpui::{
     div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
-    WindowContext,
 };
-use crate::stores::TaskStore;
+use crate::machine::MachinePanel;
+use crate::stores::{MachineStore, TaskStore};
 use crate::browser::BrowserPanel;
 use crate::terminal::TerminalPanel;
 use crate::diff::DiffPanel;
@@ -30,19 +31,25 @@ pub enum InspectorTab {
     Browser,
     Files,
     Terminal,
+    Runtime,
 }
 
 pub struct Inspector {
     tasks: Entity<TaskStore>,
+    machines: Entity<MachineStore>,
     active_tab: InspectorTab,
 }
 
 impl Inspector {
-    pub fn new(tasks: Entity<TaskStore>, cx: &mut WindowContext) -> Self {
+    pub fn new(tasks: Entity<TaskStore>, machines: Entity<MachineStore>, cx: &mut ViewContext<Self>) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
+        cx.observe(&machines, |_, _, cx| cx.notify()).detach();
 
+        // A task always has a machine, and the runtime tab is where the user
+        // finds out which one (local or remote) it is.
         Self {
             tasks,
+            machines,
             active_tab: InspectorTab::Browser,
         }
     }
@@ -77,6 +84,7 @@ impl Inspector {
             .child(self.tab_button("Browser", InspectorTab::Browser, cx))
             .child(self.tab_button("Files", InspectorTab::Files, cx))
             .child(self.tab_button("Terminal", InspectorTab::Terminal, cx))
+            .child(self.tab_button("Runtime", InspectorTab::Runtime, cx))
     }
 
     fn tab_button(
@@ -123,6 +131,26 @@ impl Inspector {
                     .flex_1()
                     .p_3()
                     .child(TerminalPanel::render_static(task))
+            }
+            InspectorTab::Runtime => {
+                // The machine of the *selected task's* runtime: for a task on
+                // devbox this shows devbox, not whatever the sidebar highlights.
+                let machines = self.machines.read(cx);
+                let selected = task
+                    .map(|task| task.machine_id.clone())
+                    .or_else(|| machines.selected.clone());
+                // Clone out of the read guard: the element outlives it.
+                let machine = selected
+                    .as_ref()
+                    .and_then(|id| machines.get(id))
+                    .cloned();
+                let runtimes = selected
+                    .as_ref()
+                    .map(|id| machines.runtimes_on(id).to_vec())
+                    .unwrap_or_default();
+                div()
+                    .flex_1()
+                    .child(MachinePanel::render_runtime_inspector(machine, runtimes))
             }
         }
     }

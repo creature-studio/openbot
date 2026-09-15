@@ -22,6 +22,9 @@ use super::attention::AttentionSnapshot;
 pub struct TaskEntity {
     pub id: TaskId,
     pub goal: String,
+    /// Machine this task's runtime lives on. Chosen when the task is created and
+    /// never changed afterwards (architecture §二十: no handoff in v1).
+    pub machine_id: MachineId,
     pub status: TaskStatus,
 
     pub timeline: Vec<TimelineItem>,
@@ -38,16 +41,27 @@ pub struct TaskEntity {
 
     pub file_changes: Vec<FileChange>,
 
+    /// True while the machine of this task has no bridge. The task is paused,
+    /// not failed — see [`TaskEntity::mark_connection_lost`].
+    pub connection_lost: bool,
+
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl TaskEntity {
+    /// A task on the local machine (the default when the user does not choose).
     pub fn new(id: TaskId, goal: String) -> Self {
+        Self::on_machine(MachineId::local(), id, goal)
+    }
+
+    /// A task whose runtime is created on `machine_id`.
+    pub fn on_machine(machine_id: MachineId, id: TaskId, goal: String) -> Self {
         let now = chrono::Utc::now();
         Self {
             id,
             goal,
+            machine_id,
             status: TaskStatus::Pending,
             timeline: Vec::new(),
             attention: None,
@@ -57,9 +71,53 @@ impl TaskEntity {
             browser_actions: Vec::new(),
             terminal_ids: Vec::new(),
             file_changes: Vec::new(),
+            connection_lost: false,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// The machine running this task lost its bridge.
+    ///
+    /// The task is **not** failed: the runtime, its PTYs and its processes are
+    /// still alive on the remote machine (architecture §十五). The timeline
+    /// gets a status line, and the agent loop resumes after a reconnect.
+    pub fn mark_connection_lost(&mut self, status: &MachineStatus) -> bool {
+        if self.connection_lost {
+            return false;
+        }
+        self.connection_lost = true;
+        self.updated_at = chrono::Utc::now();
+        self.timeline.push(TimelineItem::Status(StatusItem {
+            id: format!("conn-lost-{}", self.id.0),
+            label: "连接中断".to_string(),
+            detail: Some(format!(
+                "机器 {} 状态：{}。远端 runtime / PTY 仍然存活，重连后自动恢复。",
+                self.machine_id.as_str(),
+                status.as_str()
+            )),
+            at: chrono::Utc::now(),
+        }));
+        true
+    }
+
+    /// Reconnect succeeded: tell the user the work was never lost.
+    pub fn mark_reconnected(&mut self) -> bool {
+        if !self.connection_lost {
+            return false;
+        }
+        self.connection_lost = false;
+        self.updated_at = chrono::Utc::now();
+        self.timeline.push(TimelineItem::Status(StatusItem {
+            id: format!("conn-back-{}", self.id.0),
+            label: "已重新连接".to_string(),
+            detail: Some(format!(
+                "机器 {} 已恢复；runtime 及其中的进程仍在运行。",
+                self.machine_id.as_str()
+            )),
+            at: chrono::Utc::now(),
+        }));
+        true
     }
 
     /// Find a tool item by call_id for updating output/status.
@@ -115,6 +173,33 @@ impl TaskStore {
             order: Vec::new(),
             selected: None,
         }
+    }
+
+    /// Create a task on a machine: the machine selector in the composer sends
+    /// this, and the task is pinned to that machine from then on.
+    pub fn create_task_on(
+        &mut self,
+        machine_id: MachineId,
+        goal: String,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+        cx: &mut Context<Self>,
+    ) -> TaskId {
+        let task_id = TaskId(format!(
+            "task-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let task = TaskEntity::on_machine(machine_id.clone(), task_id.clone(), goal.clone());
+        self.add_task(task, cx);
+        let _ = command_tx.send(spark_transport::TransportCommand::CreateTask { machine_id, goal });
+        task_id
+    }
+
+    /// Machine of the selected task — what the Runtime inspector shows.
+    pub fn selected_machine(&self) -> Option<&MachineId> {
+        self.selected_task().map(|task| &task.machine_id)
     }
 
     pub fn add_task(&mut self, task: TaskEntity, cx: &mut Context<Self>) {
