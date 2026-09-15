@@ -51,6 +51,8 @@ pub use stores::{
 };
 pub use stores::machine::{MachineAttention, MachineForm};
 
+use gpui::AppContext as _;
+
 /// Start the GPUI application.
 ///
 /// The window owns [`AppState`]; every frame drains the host-agent link queue

@@ -260,7 +260,7 @@ impl Render for AttentionOverlay {
                         ),
                 ),
 
-            AttentionSnapshot::Completed { summary } => div()
+            AttentionSnapshot::Completed { summary, .. } => div()
                 .absolute()
                 .inset_0()
                 .flex()
@@ -318,7 +318,7 @@ impl Render for AttentionOverlay {
                         ),
                 ),
 
-            AttentionSnapshot::WaitingInput { prompt } => div()
+            AttentionSnapshot::WaitingInput { prompt, .. } => div()
                 .absolute()
                 .inset_0()
                 .flex()

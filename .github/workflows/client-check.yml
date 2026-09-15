@@ -40,16 +40,32 @@ jobs:
 
       # The sandbox running this agent cannot download Actions logs, so mirror
       # the failure output into check annotations (readable via the API).
-      # Cargo prints errors last, so report the tail: covers short resolution
-      # logs whole and the error region of long compile logs.
-      - name: Report error summary
+      # Each step is capped at ~10 annotations; the annotations API paginates
+      # at 30 entries (newest first), so fetch with ?per_page=100.
+      - name: Report errors 1-4
         if: failure()
         run: |
           n=$(wc -l < /tmp/check.log)
           echo "::error::cargo check failed, check.log has $n lines. Errors:"
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -E "^error(\[|:)|^ *--> " | head -9 | while IFS= read -r line; do
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^error(\[|:)" | head -8 | while IFS= read -r line; do
             safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[err] $safe"
+            echo "::error::[eA] $safe"
+          done
+
+      - name: Report errors 5-8
+        if: failure()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^error(\[|:)" | sed -n '9,16p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[eB] $safe"
+          done
+
+      - name: Report warnings
+        if: failure()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^warning(:| )" | head -8 | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[w] $safe"
           done
 
       - name: Report tail part 1/3
