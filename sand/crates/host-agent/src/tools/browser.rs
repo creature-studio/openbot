@@ -6,7 +6,6 @@ use std::process::Command;
 // If not running, tools will try to spawn it or return placeholder
 
 fn get_browser_worker_port() -> Option<u16> {
-    // Try env, then port file
     if let Ok(port_str) = std::env::var("BROWSER_WORKER_PORT") {
         if let Ok(port) = port_str.parse::<u16>() {
             return Some(port);
@@ -15,10 +14,52 @@ fn get_browser_worker_port() -> Option<u16> {
     let port_file = std::env::var("BROWSER_WORKER_PORT_FILE").unwrap_or_else(|_| "/tmp/browser-worker.port".to_string());
     if let Ok(content) = std::fs::read_to_string(&port_file) {
         if let Ok(port) = content.trim().parse::<u16>() {
-            return Some(port);
+            // Check if port is actually listening
+            if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                return Some(port);
+            }
         }
     }
     None
+}
+
+fn try_spawn_browser_worker(runtime_id: &str) -> Result<(), String> {
+    // Try to spawn browser-worker via sandd SpawnBackground
+    // Use a dedicated runtime or current runtime
+    let worker_path = "/home/user/openbot/sand/browser-worker/src/index.js";
+    if !std::path::Path::new(worker_path).exists() {
+        return Err(format!("worker path not found: {}", worker_path));
+    }
+    let req = format!(r#"{{"method":"SpawnBackground","id":"{}","command":["node","{}"]}}"#, runtime_id, worker_path);
+    match raw_rpc_spawn(&req) {
+        Ok(resp) => {
+            if resp.contains("\"ok\":true") {
+                // Wait for port file
+                for _ in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if get_browser_worker_port().is_some() {
+                        return Ok(());
+                    }
+                }
+                Err("spawned but port not found after 10s".to_string())
+            } else {
+                Err(format!("spawn failed: {}", resp))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn raw_rpc_spawn(req: &str) -> Result<String, String> {
+    use std::os::unix::net::UnixStream;
+    use std::io::{Write, BufRead, BufReader};
+    let sock_path = if std::path::Path::new("/run/sand/sandd.sock").exists() { "/run/sand/sandd.sock" } else { "/tmp/sandd/sandd.sock" };
+    let mut stream = UnixStream::connect(sock_path).map_err(|e| format!("connect failed: {}", e))?;
+    writeln!(stream, "{}", req).map_err(|e| format!("write failed: {}", e))?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).map_err(|e| format!("read failed: {}", e))?;
+    Ok(line.trim().to_string())
 }
 
 fn call_browser_worker(endpoint: &str, method: &str, body: Option<&str>) -> Result<String, String> {
@@ -92,19 +133,25 @@ impl Tool for BrowserOpenTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "browser.open".to_string(),
-            description: "Open a URL in browser via Playwright.".to_string(),
+            description: "Open a URL in browser via Playwright. Auto-spawns browser-worker via sandd if not running.".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"url":{"type":"string","description":"URL to open"}},"required":["url"]}"#.to_string(),
         }
     }
-    fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let url = extract_arg(args, "url").ok_or("missing url")?;
         let body = format!(r#"{{"url":"{}"}}"#, url.replace('"', "\\\""));
+
+        // Try existing worker, else auto-spawn via runtime
+        if get_browser_worker_port().is_none() && !runtime_id.is_empty() {
+            println!("[browser] worker not running, trying to spawn via runtime {}", runtime_id);
+            let _ = try_spawn_browser_worker(runtime_id);
+        }
+
         match call_browser_worker("/open", "POST", Some(&body)) {
             Ok(resp) => Ok(ToolResult { content: format!("opened {}: {}", url, resp), is_error: false }),
             Err(e) => {
-                // Fallback: try to spawn browser-worker if not running
                 if e.contains("not running") {
-                    Ok(ToolResult { content: format!("browser-worker not running ({}), would need to start Node + Playwright. For MVP, please run: cd sand/browser-worker && npm install && npm start", e), is_error: false })
+                    Ok(ToolResult { content: format!("browser-worker not running ({}). Auto-spawn attempted but needs Node+Playwright. Manual: cd sand/browser-worker && npm install && BROWSER_WORKER_PORT=9222 node src/index.js &", e), is_error: false })
                 } else {
                     Ok(ToolResult { content: format!("browser.open failed: {}", e), is_error: true })
                 }

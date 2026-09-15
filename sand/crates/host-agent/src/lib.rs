@@ -39,5 +39,8 @@ pub fn default_tool_registry() -> ToolRegistry {
     registry.register(tools::computer::ComputerMoveTool);
     registry.register(tools::computer::ComputerKeyTool);
     registry.register(tools::computer::ComputerScrollTool);
+    registry.register(tools::task::TaskCompleteTool);
+    registry.register(tools::task::TaskCreateTool);
+    registry.register(tools::task::TaskListTool);
     registry
 }

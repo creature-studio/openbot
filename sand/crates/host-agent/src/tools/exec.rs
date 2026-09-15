@@ -22,15 +22,17 @@ impl Tool for ShellExecTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let command = extract_arg(args, "command").ok_or("missing command")?;
 
-        // Simple permission / destructive check
-        let destructive_patterns = ["rm -rf", "rm -r /", "mkfs", "dd if=", "git push", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"];
+        // Permission / destructive check -> Attention
+        let destructive_patterns = ["rm -rf /", "rm -r /", "mkfs", "dd if=", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"];
         for pat in destructive_patterns {
             if command.contains(pat) {
-                // In real system, this would trigger Attention::PermissionRequired
-                // For MVP, we log and still allow but mark
-                eprintln!("[permission] destructive command detected: {} pattern {}", command, pat);
-                // Could return permission_required, but for now allow with warning
-                // return Ok(ToolResult { content: format!("permission_required: destructive command '{}' needs approval for pattern '{}'", command, pat), is_error: true });
+                return Ok(ToolResult { content: format!("permission_required: destructive command '{}' needs approval for pattern '{}' [tool: shell.exec]", command, pat), is_error: true });
+            }
+        }
+        let ask_patterns = ["git push", "secret", "external"];
+        for pat in ask_patterns {
+            if command.contains(pat) {
+                eprintln!("[permission] ask required for: {} pattern {}", command, pat);
             }
         }
         // Use sand-client exec

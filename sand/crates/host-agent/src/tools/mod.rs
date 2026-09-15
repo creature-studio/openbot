@@ -51,9 +51,11 @@ pub mod fs;
 pub mod terminal;
 pub mod browser;
 pub mod computer;
+pub mod task;
 
 pub use exec::ShellExecTool;
 pub use fs::{FsReadTool, FsWriteTool, FsListTool, FsSearchTool, FsStatTool, FsPatchTool};
 pub use terminal::{TerminalOpenTool, TerminalWriteTool, TerminalReadTool};
 pub use browser::{BrowserOpenTool, BrowserSnapshotTool, BrowserClickTool, BrowserFillTool, BrowserScreenshotTool, BrowserTabsTool, BrowserPressTool};
 pub use computer::{ComputerScreenshotTool, ComputerClickTool, ComputerTypeTool, ComputerMoveTool, ComputerKeyTool, ComputerScrollTool};
+pub use task::{TaskCompleteTool, TaskCreateTool, TaskListTool};

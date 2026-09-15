@@ -3,6 +3,7 @@ mod process;
 mod exec;
 mod pty;
 mod state;
+mod state_sqlite;
 mod events;
 mod cgroup;
 mod rpc;
