@@ -1,0 +1,11 @@
+[package]
+name = "sandd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sandd"
+path = "src/main.rs"
+
+[dependencies]
+sand-protocol = { path = "../sand-protocol" }
