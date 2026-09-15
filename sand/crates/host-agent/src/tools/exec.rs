@@ -1,4 +1,5 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
+use sand_protocol::{ExecRequest, ExecResult};
 
 pub struct ShellExecTool {
     sand_client: sand_client::SandClient,
@@ -20,9 +21,18 @@ impl Tool for ShellExecTool {
     }
 
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+
+    fn execute_with_context(
+        &self,
+        args: &str,
+        runtime_id: &str,
+        ctx: Option<&ToolExecutionContext>,
+    ) -> Result<ToolResult, String> {
         let command = extract_arg(args, "command").ok_or("missing command")?;
 
-        // Permission / destructive check -> Attention with unified ToolResult
+        // Permission / destructive check
         let destructive_patterns = ["rm -rf /", "rm -r /", "mkfs", "dd if=", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"];
         for pat in destructive_patterns {
             if command.contains(pat) {
@@ -35,14 +45,51 @@ impl Tool for ShellExecTool {
                 eprintln!("[permission] ask required for: {} pattern {}", command, pat);
             }
         }
-        // Use sand-client binary exec for efficiency (no base64)
+
         let start = std::time::SystemTime::now();
+
+        // Try routing through transport if context available
+        if let Some(ctx) = ctx {
+            let machine_id = ctx.default_machine();
+            if let Some(transport) = ctx.transport_for(&machine_id) {
+                let exec_req = ExecRequest {
+                    runtime_id: sand_protocol::RuntimeId::from_string(runtime_id.to_string()),
+                    command: vec!["bash".to_string(), "-lc".to_string(), command.clone()],
+                    cwd: None,
+                    env: std::collections::HashMap::new(),
+                    timeout_ms: Some(30000),
+                    stdin_data: None,
+                };
+                // Use tokio runtime to block on async call
+                let result = tokio::runtime::Handle::current()
+                    .block_on(transport.exec(exec_req));
+                if let Ok(result) = result {
+                    let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
+                    let content = format!("exit_code: {}\nstdout (transport, {} bytes):\n{}\nstderr:\n{}",
+                        result.exit_code.unwrap_or(-1),
+                        result.stdout.len(),
+                        String::from_utf8_lossy(&result.stdout),
+                        String::from_utf8_lossy(&result.stderr));
+                    let mut tool_result = if result.exit_code == Some(0) {
+                        super::ToolResult::success(content)
+                    } else {
+                        super::ToolResult::error(content, Some("PROCESS_EXIT_NONZERO".to_string()))
+                    };
+                    tool_result.tool_name = "shell.exec".to_string();
+                    tool_result.duration_ms = duration;
+                    return Ok(tool_result);
+                }
+            }
+        }
+
+        // Fallback: direct sand-client exec (local only)
         let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
         match self.sand_client.exec_binary(runtime_id, cmd_vec) {
             Ok((json_resp, stdout, stderr)) => {
                 let exit_code = extract_number_field(&json_resp, "exit_code").unwrap_or(0);
                 let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
-                let content = format!("exit_code: {}\nstdout (binary RPC, {} bytes, no base64):\n{}\nstderr:\n{}", exit_code, stdout.len(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+                let content = format!("exit_code: {}\nstdout (binary RPC, {} bytes, no base64):\n{}\nstderr:\n{}",
+                    exit_code, stdout.len(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
                 let mut result = if exit_code == 0 {
                     super::ToolResult::success(content)
                 } else {
@@ -54,14 +101,16 @@ impl Tool for ShellExecTool {
             }
             Err(_) => {
                 // Fallback to JSON RPC
-                let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
                 match self.sand_client.exec(runtime_id, cmd_vec) {
                     Ok(resp) => {
-                        let stdout = extract_b64_field(&resp, "stdout_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
-                        let stderr = extract_b64_field(&resp, "stderr_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
+                        let stdout = extract_b64_field(&resp, "stdout_b64")
+                            .map(|b64| base64_decode(&b64)).unwrap_or_default();
+                        let stderr = extract_b64_field(&resp, "stderr_b64")
+                            .map(|b64| base64_decode(&b64)).unwrap_or_default();
                         let exit_code = extract_number_field(&resp, "exit_code").unwrap_or(0);
                         let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
-                        let content = format!("exit_code: {}\nstdout:\n{}\nstderr:\n{}", exit_code, String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
+                        let content = format!("exit_code: {}\nstdout:\n{}\nstderr:\n{}",
+                            exit_code, String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
                         let mut result = if exit_code == 0 {
                             super::ToolResult::success(content)
                         } else {
@@ -79,10 +128,9 @@ impl Tool for ShellExecTool {
 }
 
 fn extract_arg(json: &str, key: &str) -> Option<String> {
-    // naive: look for "key":"value" or "key": "value"
     let pat = format!("\"{}\":", key);
     let start = json.find(&pat)?;
-    let rest = json[start+pat.len()..].trim_start();
+    let rest = &json[start+pat.len()..].trim_start();
     if rest.starts_with('"') {
         let rest = &rest[1..];
         let end = rest.find('"')?;
@@ -110,7 +158,7 @@ fn extract_number_field(s: &str, field: &str) -> Option<i32> {
 
 fn base64_decode(s: &str) -> Vec<u8> {
     let mut table = [255u8; 256];
-    for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+    for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" .iter().enumerate() {
         table[c as usize] = i as u8;
     }
     let mut out = Vec::new();

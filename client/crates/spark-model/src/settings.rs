@@ -11,6 +11,9 @@ pub struct Settings {
     pub show_files_panel: bool,
     pub auto_expand_running_tools: bool,
     pub timeline_virtualize: bool,
+    /// Saved machines (local + SSH). SSH credentials are NOT stored here —
+    /// this only stores display info. Real auth uses ~/.ssh/config + ssh-agent.
+    pub machines: Vec<Machine>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +34,7 @@ impl Default for Settings {
             show_files_panel: true,
             auto_expand_running_tools: true,
             timeline_virtualize: true,
+            machines: vec![],
         }
     }
 }

@@ -1,4 +1,4 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 
 pub struct TerminalOpenTool {
     client: sand_client::SandClient,
@@ -29,10 +29,33 @@ impl Tool for TerminalOpenTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").unwrap_or_else(|| format!("term-{}", std::process::id()));
         let shell = extract_arg(args, "shell").unwrap_or_else(|| "/bin/bash".to_string());
         let cols = extract_number(args, "cols").unwrap_or(80) as u16;
         let rows = extract_number(args, "rows").unwrap_or(24) as u16;
+        // Try transport routing first
+        if let Some(ctx) = ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::PtyOpenRequest {
+                    runtime_id: runtime_id.to_string(),
+                    pty_id: pty_id.clone(),
+                    cols,
+                    rows,
+                    shell: shell.clone(),
+                };
+                match tokio::runtime::Handle::current().block_on(transport.open_pty(req)) {
+                    Ok(()) => {
+                        return Ok(ToolResult::success(format!("opened pty {} ({}x{}) shell={} via transport in runtime {}", pty_id, cols, rows, shell, runtime_id)));
+                    }
+                    Err(e) => {
+                        // Fall through to direct client
+                    }
+                }
+            }
+        }
         match self.client.open_pty(runtime_id, &pty_id, cols, rows) {
             Ok(resp) => Ok(ToolResult::success(format!("opened pty {} ({}x{}) shell={} TERM=xterm-256color ANSI enabled in runtime {}: {}\nUse terminal.write with data=\"\\x03\" for Ctrl+C, \"\\x04\" for Ctrl+D, or signal tool", pty_id, cols, rows, shell, runtime_id, resp))),
             Err(e) => Ok(ToolResult::error(format!("open pty failed: {}", e), None)),
@@ -49,8 +72,29 @@ impl Tool for TerminalWriteTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         let data = extract_arg(args, "data").ok_or("missing data")?;
+        // Try transport routing first
+        if let Some(ctx) = ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::PtyWriteRequest {
+                    runtime_id: runtime_id.to_string(),
+                    pty_id: pty_id.clone(),
+                    data: data.as_bytes().to_vec(),
+                };
+                match tokio::runtime::Handle::current().block_on(transport.write_pty(req)) {
+                    Ok(()) => {
+                        return Ok(ToolResult::success(format!("write to {} via transport: ok", pty_id)));
+                    }
+                    Err(e) => {
+                        // Fall through to direct client
+                    }
+                }
+            }
+        }
         // Try binary RPC first (efficient, no base64)
         match self.client.write_pty_binary(runtime_id, &pty_id, data.as_bytes()) {
             Ok(resp) => Ok(ToolResult::success(format!("write to {} via binary RPC: {}", pty_id, resp))),
@@ -76,8 +120,24 @@ impl Tool for TerminalReadTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         let clear = args.contains("\"clear\":true");
+        // Try transport routing first
+        if let Some(ctx) = ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                match tokio::runtime::Handle::current().block_on(transport.read_pty(runtime_id, &pty_id, clear)) {
+                    Ok(resp) => {
+                        return Ok(ToolResult::success(format!("pty {} output via transport ({} bytes): {}", pty_id, resp.data.len(), String::from_utf8_lossy(&resp.data))));
+                    }
+                    Err(e) => {
+                        // Fall through to direct client
+                    }
+                }
+            }
+        }
         // Try binary RPC
         match self.client.read_pty_binary(runtime_id, &pty_id, clear) {
             Ok((json, data)) => {

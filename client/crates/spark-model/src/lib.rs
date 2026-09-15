@@ -10,6 +10,7 @@ pub mod timeline;
 pub mod attention;
 pub mod connection;
 pub mod settings;
+pub mod machine;
 
 pub use bot::{BotId, Bot};
 pub use task::{TaskId, TaskStatus, TaskSummary, TaskDetail};
@@ -22,3 +23,7 @@ pub use timeline::{
 pub use attention::Attention;
 pub use connection::{ConnectionStatus, ServerInfo};
 pub use settings::Settings;
+pub use machine::{
+    Machine, MachineId, MachineKind, MachineStatus, MachineCapabilities,
+    MachineMetadata, MachineConnection, SshHostKey,
+};

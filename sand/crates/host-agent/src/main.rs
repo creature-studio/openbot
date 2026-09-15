@@ -1,7 +1,13 @@
-use host_agent::{AgentSession, AgentLoop, Model, MockModel, default_tool_registry, HostAgentApi, AgentStatus, SqlitePersistence};
+use host_agent::{
+    AgentSession, AgentLoop, Model, MockModel, default_tool_registry,
+    HostAgentApi, AgentStatus, SqlitePersistence, MachineManager,
+};
 use host_agent::agent::session::{Message, Role, ToolCall};
 use host_agent::model::ModelResponse;
+use host_agent::tools::ToolExecutionContext;
+use sand_protocol::MachineId;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn get_persistence() -> Option<SqlitePersistence> {
     let path = if std::path::Path::new("/run/sand").exists() {
@@ -34,6 +40,24 @@ fn main() {
             if persistence.is_some() {
                 println!("[host-agent] persistence enabled at /run/sand/state.db");
             }
+
+            // Phase 3: Initialize MachineManager
+            let machine_mgr = Arc::new(MachineManager::new());
+            let default_machine_id = MachineId::local();
+
+            // Build tool execution context
+            let ctx = ToolExecutionContext::new(
+                Arc::new(move |machine_id| {
+                    machine_mgr.transport(machine_id)
+                }),
+                Arc::new(move |machine_id| {
+                    machine_mgr.get_machine(machine_id).cloned()
+                }),
+                Arc::new(move || {
+                    machine_mgr.list_machines()
+                }),
+                default_machine_id,
+            );
 
             let api = HostAgentApi::new();
             let mut session = match api.create_session("gpt-4o-mini".to_string()) {
@@ -69,7 +93,7 @@ fn main() {
                             },
                             ModelResponse {
                                 content: "Let me check Cargo.toml".to_string(),
-                                tool_calls: vec![ToolCall { id: "call-2".to_string(), name: "file.read".to_string(), arguments: r#"{"path":"Cargo.toml"}"#.to_string() }],
+                                tool_calls: vec![ToolCall { id: "call-2".to_string(), name: "file.read".to_string(), arguments: r#""{"path":"Cargo.toml"}"#.to_string() }],
                             },
                             ModelResponse {
                                 content: "Project is Rust workspace with sandd runtime kernel. Ready.".to_string(),
@@ -87,7 +111,7 @@ fn main() {
                     },
                     ModelResponse {
                         content: "Now check Cargo.toml".to_string(),
-                        tool_calls: vec![ToolCall { id: "call-2".to_string(), name: "file.read".to_string(), arguments: r#"{"path":"/home/user/openbot/sand/Cargo.toml"}"#.to_string() }],
+                        tool_calls: vec![ToolCall { id: "call-2".to_string(), name: "file.read".to_string(), arguments: r#""{"path":"/home/user/openbot/sand/Cargo.toml"}"#.to_string() }],
                     },
                     ModelResponse {
                         content: "Let me run cargo test list".to_string(),
@@ -103,7 +127,8 @@ fn main() {
             let tools = default_tool_registry();
             let agent_loop = AgentLoop::new().with_max_iterations(10);
 
-            let result = agent_loop.run(&mut session, model.as_ref(), &tools, |event| {
+            // Pass tool context through the loop
+            let result = agent_loop.run_with_context(&mut session, model.as_ref(), &tools, &ctx, |event| {
                 match event {
                     host_agent::agent::LoopEvent::ModelCalled { iteration } => println!("[loop] calling model iteration {}...", iteration),
                     host_agent::agent::LoopEvent::ToolCallStarted { name, args, call_id } => println!("[loop] tool call {} {} {}", call_id, name, args),

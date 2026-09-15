@@ -6,15 +6,17 @@ pub mod events;
 pub mod api;
 pub mod persistence;
 pub mod workbench;
+pub mod machine;
 
 pub use agent::{AgentSession, AgentSessionId, AgentStatus, Attention, AgentContext, AgentLoop, Task, TaskManager};
 pub use model::{Model, ModelResponse, MockModel, OpenAICompatibleModel};
-pub use tools::{ToolRegistry, Tool, ToolDefinition, ToolResult};
+pub use tools::{ToolRegistry, Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 pub use runtime::RuntimeManager;
 pub use events::{EventBus, AgentEvent};
 pub use api::HostAgentApi;
 pub use persistence::SqlitePersistence;
 pub use workbench::WorkbenchManager;
+pub use machine::MachineManager;
 
 pub fn default_tool_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();

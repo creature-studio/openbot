@@ -10,6 +10,7 @@ pub mod task;
 pub mod workbench;
 pub mod attention;
 pub mod settings;
+pub mod machine;
 
 pub use connection::ConnectionStore;
 pub use bot::BotStore;
@@ -17,3 +18,4 @@ pub use task::TaskStore;
 pub use workbench::WorkbenchStore;
 pub use attention::AttentionStore;
 pub use settings::SettingsStore;
+pub use machine::MachineStore;

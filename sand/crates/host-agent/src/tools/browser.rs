@@ -1,5 +1,6 @@
-use super::{Tool, ToolDefinition, ToolResult};
+use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
 use std::process::Command;
+use spark_transport::{BrowserRequest, BrowserAction};
 
 // Browser tools now call browser-worker Node + Playwright via HTTP
 // browser-worker is expected to be running at 127.0.0.1:port from /tmp/browser-worker.port
@@ -193,8 +194,32 @@ impl Tool for BrowserOpenTool {
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let url = extract_arg(args, "url").ok_or("missing url")?;
         let body = format!(r#"{{"url":"{}"}}"#, url.replace('"', "\\\""));
+
+        // Try transport routing first
+        if let Some(ctx) = ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::BrowserRequest {
+                    runtime_id: runtime_id.to_string(),
+                    action: BrowserAction::Open { url: url.clone() },
+                };
+                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                    Ok(spark_transport::BrowserResponse { error: None, .. }) => {
+                        return Ok(ToolResult::success(format!("opened {} via transport in runtime {}", url, runtime_id)));
+                    }
+                    Ok(spark_transport::BrowserResponse { error: Some(e), .. }) => {
+                        // Fall through to browser-worker
+                    }
+                    Err(_) => {
+                        // Fall through to browser-worker
+                    }
+                }
+            }
+        }
 
         // Try existing worker, else auto-spawn via runtime
         if get_browser_worker_port().is_none() && !runtime_id.is_empty() {
@@ -224,10 +249,12 @@ impl Tool for BrowserSnapshotTool {
         }
     }
     fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(_args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, _args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         match call_browser_worker("/snapshot", "GET", None) {
             Ok(resp) => {
                 if let Some(snap) = extract_field(&resp, "snapshot") {
-                    // snapshot field is escaped, need unescape
                     let unescaped = snap.replace("\\n", "\n").replace("\\\"", "\"");
                     Ok(ToolResult::success(format!("snapshot:\n{}", unescaped)))
                 } else {
@@ -248,8 +275,28 @@ impl Tool for BrowserClickTool {
         }
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let r = extract_arg(args, "ref").or_else(|| extract_arg(args, "ref_id")).ok_or("missing ref")?;
         let body = format!(r#"{{"ref":"{}"}}"#, r);
+
+        // Try transport routing first
+        if let Some(ctx) = _ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::BrowserRequest {
+                    runtime_id: _runtime_id.to_string(),
+                    action: BrowserAction::Click { selector: r.clone() },
+                };
+                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                    Ok(spark_transport::BrowserResponse { error: None, .. }) => {
+                        return Ok(ToolResult::success(format!("clicked {} via transport", r)));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+        }
+
         match call_browser_worker("/click", "POST", Some(&body)) {
             Ok(resp) => Ok(ToolResult::success(format!("clicked {}: {}", r, resp))),
             Err(e) => Ok(ToolResult::success(format!("browser.click failed: {}", e))),
@@ -266,9 +313,29 @@ impl Tool for BrowserFillTool {
         }
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
         let r = extract_arg(args, "ref").ok_or("missing ref")?;
         let value = extract_arg(args, "value").ok_or("missing value")?;
         let body = format!(r#"{{"ref":"{}","value":"{}"}}"#, r, value.replace('"', "\\\""));
+
+        // Try transport routing first
+        if let Some(ctx) = _ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::BrowserRequest {
+                    runtime_id: _runtime_id.to_string(),
+                    action: BrowserAction::Fill { selector: r.clone(), value: value.clone() },
+                };
+                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                    Ok(spark_transport::BrowserResponse { error: None, .. }) => {
+                        return Ok(ToolResult::success(format!("filled {} via transport", r)));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+        }
+
         match call_browser_worker("/fill", "POST", Some(&body)) {
             Ok(resp) => Ok(ToolResult::success(format!("filled {}: {}", r, resp))),
             Err(e) => Ok(ToolResult::success(format!("browser.fill failed: {}", e))),
@@ -285,6 +352,26 @@ impl Tool for BrowserScreenshotTool {
         }
     }
     fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(_args, _runtime_id, None)
+    }
+    fn execute_with_context(&self, _args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
+        // Try transport routing first
+        if let Some(ctx) = _ctx {
+            if let Some(transport) = ctx.transport_for(&ctx.default_machine()) {
+                let req = spark_transport::BrowserRequest {
+                    runtime_id: _runtime_id.to_string(),
+                    action: BrowserAction::Screenshot,
+                };
+                match tokio::runtime::Handle::current().block_on(transport.browser_request(req)) {
+                    Ok(spark_transport::BrowserResponse { snapshot: Some(data), error: None, .. }) => {
+                        let b64 = base64_encode(&data);
+                        return Ok(ToolResult::success(format!("screenshot via transport {} bytes, base64 length {}", data.len(), b64.len())));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+        }
+
         match call_browser_worker("/screenshot", "POST", None) {
             Ok(resp) => Ok(ToolResult::success(format!("screenshot: {}", resp.chars().take(200).collect::<String>()))),
             Err(e) => Ok(ToolResult::success(format!("browser.screenshot failed: {}", e))),
