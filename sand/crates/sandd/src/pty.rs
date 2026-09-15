@@ -419,13 +419,40 @@ impl PtyManager {
         let key = format!("{}:{}", runtime_id, pty_id);
         let inners = self.inners.lock().unwrap();
         if let Some(inner) = inners.get(&key) {
-            unsafe { kill(inner.child_pid, signal); }
+            // Try to get foreground process group via tcgetpgrp on master fd, then kill(-pgid)
+            // This ensures Ctrl+C goes to foreground group (bash -> npm -> node) not just shell pid
+            unsafe {
+                if inner.master_fd >= 0 {
+                    let pgid = tcgetpgrp(inner.master_fd);
+                    if pgid > 1 {
+                        // kill(-pgid, signal) sends to process group
+                        let ret = kill(-pgid, signal);
+                        if ret == 0 {
+                            return Ok(());
+                        }
+                        eprintln!("[pty] kill(-pgid {}, sig {}) failed: {}, fallback to child pid", pgid, signal, std::io::Error::last_os_error());
+                    }
+                }
+                // Fallback: kill child pid directly
+                kill(inner.child_pid, signal);
+            }
             Ok(())
         } else {
             let sessions = self.sessions.lock().unwrap();
             if let Some(map) = sessions.get(runtime_id) {
                 if let Some(sess) = map.get(pty_id) {
-                    unsafe { kill(sess.pid, signal); }
+                    // Try pgid via master fd if available
+                    unsafe {
+                        if sess.master_fd >= 0 {
+                            let pgid = tcgetpgrp(sess.master_fd);
+                            if pgid > 1 {
+                                if kill(-pgid, signal) == 0 {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        kill(sess.pid, signal);
+                    }
                     return Ok(());
                 }
             }
@@ -512,6 +539,7 @@ extern "C" {
     fn _exit(status: i32) -> !;
     fn kill(pid: i32, sig: i32) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn tcgetpgrp(fd: i32) -> i32;
 }
 
 fn libc_wifexited(status: i32) -> bool {

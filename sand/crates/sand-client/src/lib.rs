@@ -189,8 +189,32 @@ impl SandClient {
         self.call(&req)
     }
 
-    pub fn set_pty_raw(&self, id: &str, pty_id: &str, raw: bool) -> std::io::Result<String> {
-        let req = format!(r#"{{"method":"SetPtyRaw","id":"{}","pty_id":"{}","raw":{}}}"#, id, pty_id, raw);
+    pub fn acquire_lease(&self, runtime_id: &str, owner: &str, session_id: &str) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"AcquireLease","runtime_id":"{}","owner":"{}","session_id":"{}"}}"#, runtime_id, owner, session_id);
+        self.call(&req)
+    }
+
+    pub fn release_lease(&self, lease_id: &str) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"ReleaseLease","lease_id":"{}"}}"#, lease_id);
+        self.call(&req)
+    }
+
+    pub fn release_lease_by_session(&self, session_id: &str) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"ReleaseLease","session_id":"{}"}}"#, session_id);
+        self.call(&req)
+    }
+
+    pub fn list_leases(&self, runtime_id: Option<&str>) -> std::io::Result<String> {
+        let req = if let Some(rid) = runtime_id {
+            format!(r#"{{"method":"ListLeases","runtime_id":"{}"}}"#, rid)
+        } else {
+            r#"{"method":"ListLeases"}"#.to_string()
+        };
+        self.call(&req)
+    }
+
+    pub fn task_complete(&self, runtime_id: &str, owner: &str) -> std::io::Result<String> {
+        let req = format!(r#"{{"method":"TaskComplete","runtime_id":"{}","owner":"{}"}}"#, runtime_id, owner);
         self.call(&req)
     }
 }

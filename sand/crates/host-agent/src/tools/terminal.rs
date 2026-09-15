@@ -34,8 +34,8 @@ impl Tool for TerminalOpenTool {
         let cols = extract_number(args, "cols").unwrap_or(80) as u16;
         let rows = extract_number(args, "rows").unwrap_or(24) as u16;
         match self.client.open_pty(runtime_id, &pty_id, cols, rows) {
-            Ok(resp) => Ok(ToolResult { content: format!("opened pty {} ({}x{}) shell={} TERM=xterm-256color ANSI enabled in runtime {}: {}\nUse terminal.write with data=\"\\x03\" for Ctrl+C, \"\\x04\" for Ctrl+D, or signal tool", pty_id, cols, rows, shell, runtime_id, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("open pty failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("opened pty {} ({}x{}) shell={} TERM=xterm-256color ANSI enabled in runtime {}: {}\nUse terminal.write with data=\"\\x03\" for Ctrl+C, \"\\x04\" for Ctrl+D, or signal tool", pty_id, cols, rows, shell, runtime_id, resp))),
+            Err(e) => Ok(ToolResult::error(format!("open pty failed: {}", e), None)),
         }
     }
 }
@@ -53,14 +53,14 @@ impl Tool for TerminalWriteTool {
         let data = extract_arg(args, "data").ok_or("missing data")?;
         // Try binary RPC first (efficient, no base64)
         match self.client.write_pty_binary(runtime_id, &pty_id, data.as_bytes()) {
-            Ok(resp) => Ok(ToolResult { content: format!("write to {} via binary RPC: {}", pty_id, resp), is_error: false }),
+            Ok(resp) => Ok(ToolResult::success(format!("write to {} via binary RPC: {}", pty_id, resp))),
             Err(_) => {
                 // Fallback to base64 JSON RPC
                 let b64 = base64_encode(data.as_bytes());
                 let req = format!(r#"{{"method":"WritePty","id":"{}","pty_id":"{}","data_b64":"{}"}}"#, runtime_id, pty_id, b64);
                 match raw_rpc(&req) {
-                    Ok(resp) => Ok(ToolResult { content: format!("write to {}: {}", pty_id, resp), is_error: false }),
-                    Err(e) => Ok(ToolResult { content: format!("write failed: {}", e), is_error: true }),
+                    Ok(resp) => Ok(ToolResult::success(format!("write to {}: {}", pty_id, resp))),
+                    Err(e) => Ok(ToolResult::error(format!("write failed: {}", e), None)),
                 }
             }
         }
@@ -81,7 +81,7 @@ impl Tool for TerminalReadTool {
         // Try binary RPC
         match self.client.read_pty_binary(runtime_id, &pty_id, clear) {
             Ok((json, data)) => {
-                Ok(ToolResult { content: format!("pty {} output via binary RPC ({} bytes) json={}:\n{}", pty_id, data.len(), json, String::from_utf8_lossy(&data)), is_error: false })
+                Ok(ToolResult::success(format!("pty {} output via binary RPC ({} bytes) json={}:\n{}", pty_id, data.len(), json, String::from_utf8_lossy(&data))))
             }
             Err(_) => {
                 let req = format!(r#"{{"method":"ReadPty","id":"{}","pty_id":"{}","clear":{}}}"#, runtime_id, pty_id, clear);
@@ -89,9 +89,9 @@ impl Tool for TerminalReadTool {
                     Ok(resp) => {
                         let b64 = extract_field(&resp, "data_b64").unwrap_or_default();
                         let data = base64_decode(&b64);
-                        Ok(ToolResult { content: format!("pty {} output ({} bytes):\n{}", pty_id, data.len(), String::from_utf8_lossy(&data)), is_error: false })
+                        Ok(ToolResult::success(format!("pty {} output ({} bytes):\n{}", pty_id, data.len(), String::from_utf8_lossy(&data))))
                     }
-                    Err(e) => Ok(ToolResult { content: format!("read failed: {}", e), is_error: true }),
+                    Err(e) => Ok(ToolResult::error(format!("read failed: {}", e), None)),
                 }
             }
         }

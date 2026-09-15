@@ -12,9 +12,74 @@ use crate::process::ProcessManager;
 use crate::pty::PtyManager;
 use crate::desktop::DesktopManager;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeaseOwner {
+    Task(String),      // task_id
+    Workbench(String), // workbench_id or user
+    Bot(String),       // bot_id
+}
+
+impl LeaseOwner {
+    pub fn from_str(s: &str) -> Self {
+        if s.starts_with("task:") {
+            Self::Task(s.trim_start_matches("task:").to_string())
+        } else if s.starts_with("workbench:") {
+            Self::Workbench(s.trim_start_matches("workbench:").to_string())
+        } else if s.starts_with("bot:") {
+            Self::Bot(s.trim_start_matches("bot:").to_string())
+        } else {
+            Self::Task(s.to_string())
+        }
+    }
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Task(id) => format!("task:{}", id),
+            Self::Workbench(id) => format!("workbench:{}", id),
+            Self::Bot(id) => format!("bot:{}", id),
+        }
+    }
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Task(_) => "Task",
+            Self::Workbench(_) => "Workbench",
+            Self::Bot(_) => "Bot",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeLease {
+    pub lease_id: String,
+    pub runtime_id: String,
+    pub owner: LeaseOwner,
+    pub session_id: String, // Session A/B that holds the lease
+    pub created_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+    pub active: bool,
+}
+
+impl RuntimeLease {
+    pub fn new(runtime_id: String, owner: LeaseOwner, session_id: String) -> Self {
+        let now = now_ms();
+        let lease_id = format!("lease-{}-{}", runtime_id, now);
+        Self {
+            lease_id,
+            runtime_id,
+            owner,
+            session_id,
+            created_at_ms: now,
+            expires_at_ms: None,
+            active: true,
+        }
+    }
+}
+
 pub struct RuntimeManager {
     runtimes: Arc<Mutex<HashMap<String, Runtime>>>,
     processes: Arc<Mutex<HashMap<String, Vec<i32>>>>, // runtime_id -> pids
+    leases: Arc<Mutex<HashMap<String, RuntimeLease>>>, // lease_id -> lease
+    runtime_leases: Arc<Mutex<HashMap<String, Vec<String>>>>, // runtime_id -> lease_ids
+    session_leases: Arc<Mutex<HashMap<String, String>>>, // session_id -> lease_id
     state_mgr: Arc<StateManager>,
     cgroup_mgr: Arc<CgroupManager>,
     event_bus: Arc<EventBus>,
@@ -31,6 +96,9 @@ impl RuntimeManager {
         Self {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             processes: Arc::new(Mutex::new(HashMap::new())),
+            leases: Arc::new(Mutex::new(HashMap::new())),
+            runtime_leases: Arc::new(Mutex::new(HashMap::new())),
+            session_leases: Arc::new(Mutex::new(HashMap::new())),
             state_mgr,
             cgroup_mgr,
             event_bus,
@@ -238,5 +306,123 @@ impl RuntimeManager {
 
     pub fn desktop_manager(&self) -> Arc<DesktopManager> {
         self.desktop_mgr.clone()
+    }
+
+    // --- Lease model: owner Task|Workbench|Bot, leases Session A/B, Session only gets lease ---
+    pub fn acquire_lease(&self, runtime_id: &str, owner_str: &str, session_id: &str) -> Result<RuntimeLease, String> {
+        // Check runtime exists
+        let rid = RuntimeId::from_string(runtime_id.to_string());
+        if self.get_runtime(&rid).is_none() {
+            return Err(format!("runtime {} not found", runtime_id));
+        }
+        let owner = LeaseOwner::from_str(owner_str);
+        let lease = RuntimeLease::new(runtime_id.to_string(), owner, session_id.to_string());
+        {
+            let mut leases = self.leases.lock().unwrap();
+            leases.insert(lease.lease_id.clone(), lease.clone());
+        }
+        {
+            let mut rl = self.runtime_leases.lock().unwrap();
+            rl.entry(runtime_id.to_string()).or_default().push(lease.lease_id.clone());
+        }
+        {
+            let mut sl = self.session_leases.lock().unwrap();
+            sl.insert(session_id.to_string(), lease.lease_id.clone());
+        }
+        eprintln!("[lease] acquired {} for runtime {} owner {} session {}", lease.lease_id, runtime_id, owner_str, session_id);
+        Ok(lease)
+    }
+
+    pub fn release_lease(&self, lease_id: &str) -> Result<(), String> {
+        let lease_opt = {
+            let mut leases = self.leases.lock().unwrap();
+            leases.remove(lease_id)
+        };
+        if let Some(lease) = lease_opt {
+            {
+                let mut rl = self.runtime_leases.lock().unwrap();
+                if let Some(list) = rl.get_mut(&lease.runtime_id) {
+                    list.retain(|id| id != lease_id);
+                }
+            }
+            {
+                let mut sl = self.session_leases.lock().unwrap();
+                sl.retain(|_, v| v != lease_id);
+            }
+            eprintln!("[lease] released {} for runtime {} session {}", lease_id, lease.runtime_id, lease.session_id);
+            Ok(())
+        } else {
+            Err(format!("lease {} not found", lease_id))
+        }
+    }
+
+    pub fn release_lease_by_session(&self, session_id: &str) -> Result<(), String> {
+        let lease_id_opt = {
+            let sl = self.session_leases.lock().unwrap();
+            sl.get(session_id).cloned()
+        };
+        if let Some(lease_id) = lease_id_opt {
+            self.release_lease(&lease_id)
+        } else {
+            Err(format!("no lease for session {}", session_id))
+        }
+    }
+
+    pub fn list_leases(&self, runtime_id: Option<&str>) -> Vec<RuntimeLease> {
+        let leases = self.leases.lock().unwrap();
+        if let Some(rid) = runtime_id {
+            leases.values().filter(|l| l.runtime_id == rid && l.active).cloned().collect()
+        } else {
+            leases.values().filter(|l| l.active).cloned().collect()
+        }
+    }
+
+    pub fn get_lease_for_session(&self, session_id: &str) -> Option<RuntimeLease> {
+        let sl = self.session_leases.lock().unwrap();
+        if let Some(lease_id) = sl.get(session_id) {
+            let leases = self.leases.lock().unwrap();
+            leases.get(lease_id).cloned()
+        } else {
+            None
+        }
+    }
+
+    // Task complete+confirmed -> destroy runtime, Workbench long-lived
+    pub fn try_destroy_if_task_complete(&self, runtime_id: &str, owner_str: &str) -> Result<bool, String> {
+        // If owner is Task and task is complete+confirmed, destroy runtime
+        // For now, we check if owner is Task and no active leases for that runtime, then destroy
+        // Workbench leases are long-lived, so we don't auto-destroy them
+        let owner = LeaseOwner::from_str(owner_str);
+        match owner {
+            LeaseOwner::Task(_) => {
+                // Check if any active leases remain for this runtime
+                let active_leases = self.list_leases(Some(runtime_id));
+                if active_leases.is_empty() {
+                    let rid = RuntimeId::from_string(runtime_id.to_string());
+                    self.destroy_runtime(&rid)?;
+                    eprintln!("[lease] Task {} complete+confirmed, destroyed runtime {}", owner_str, runtime_id);
+                    Ok(true)
+                } else {
+                    eprintln!("[lease] Task {} complete but {} leases still active, not destroying runtime {}", owner_str, active_leases.len(), runtime_id);
+                    Ok(false)
+                }
+            }
+            LeaseOwner::Workbench(_) => {
+                // Workbench long-lived, do not destroy
+                eprintln!("[lease] Workbench {} owns runtime {}, keeping long-lived", owner_str, runtime_id);
+                Ok(false)
+            }
+            LeaseOwner::Bot(_) => {
+                // Bot: check if task associated? For now, same as Task but allow explicit destroy
+                let active_leases = self.list_leases(Some(runtime_id));
+                if active_leases.is_empty() {
+                    let rid = RuntimeId::from_string(runtime_id.to_string());
+                    self.destroy_runtime(&rid)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
     }
 }

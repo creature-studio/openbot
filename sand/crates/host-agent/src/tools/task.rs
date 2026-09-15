@@ -46,7 +46,7 @@ conn.commit()
             );
             let _ = std::process::Command::new("python3").args(["-c", &python_code]).output();
         }
-        Ok(ToolResult { content: format!("task.complete called with result: {}\nTask marked ReadyForCheck, runtime {} will be kept until user approval, then released. Agent loop will freeze.", result, runtime_id), is_error: false })
+        Ok(ToolResult::success(format!("task.complete called with result: {}\nTask marked ReadyForCheck, runtime {} will be kept until user approval, then released. Agent loop will freeze.", result, runtime_id)))
     }
 }
 
@@ -60,7 +60,7 @@ impl Tool for TaskCreateTool {
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let goal = extract_arg(args, "goal").ok_or("missing goal")?;
-        Ok(ToolResult { content: format!("task.create goal '{}' in runtime {} - would create Task with session", goal, runtime_id), is_error: false })
+        Ok(ToolResult::success(format!("task.create goal '{}' in runtime {} - would create Task with session", goal, runtime_id)))
     }
 }
 
@@ -83,11 +83,11 @@ impl Tool for TaskListTool {
             if let Ok(out) = output {
                 if out.status.success() {
                     let content = String::from_utf8_lossy(&out.stdout).to_string();
-                    return Ok(ToolResult { content: format!("tasks:\n{}", content), is_error: false });
+                    return Ok(ToolResult::success(format!("tasks:\n{}", content)));
                 }
             }
         }
-        Ok(ToolResult { content: "no tasks or persistence not available".to_string(), is_error: false })
+        Ok(ToolResult::success("no tasks or persistence not available".to_string()))
     }
 }
 

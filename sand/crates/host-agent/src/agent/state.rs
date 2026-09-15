@@ -46,7 +46,7 @@ pub enum TaskStatus {
 pub struct Task {
     pub id: String,
     pub goal: String,
-    pub session_id: super::session::AgentSessionId,
+    pub session_id: String, // was AgentSessionId, now String for simplicity
     pub runtime_id: String,
     pub status: TaskStatus,
     pub artifacts: Vec<String>,
@@ -56,7 +56,7 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(goal: String, session_id: super::session::AgentSessionId, runtime_id: String) -> Self {
+    pub fn new(goal: String, session_id: String, runtime_id: String) -> Self {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         Self {
             id: format!("task-{:x}", now),

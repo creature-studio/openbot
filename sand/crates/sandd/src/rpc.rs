@@ -432,15 +432,46 @@ fn handle_request(req_str: &str, mgr: &RuntimeManager) -> String {
                 Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
             }
         }
-        "SetPtyRaw" => {
-            // For raw mode handling, we can set termios raw via ioctl? For MVP, just log and return ok
-            // Real implementation would use tcsetattr via FFI
-            let id_str = extract_string_field(req_str, "id").unwrap_or_default();
-            let pty_id = extract_string_field(req_str, "pty_id").unwrap_or_else(|| "default".to_string());
-            let raw = req_str.contains("\"raw\":true");
-            // If raw=true, we would set raw mode, else cooked
-            // For now, we just return ok, as PTY already handles raw bytes via WritePty
-            format!("{{\"ok\":true,\"id\":\"{}\",\"pty_id\":\"{}\",\"raw\":{}}}", escape_json(&id_str), escape_json(&pty_id), raw)
+        "AcquireLease" => {
+            let runtime_id = extract_string_field(req_str, "runtime_id").or_else(|| extract_string_field(req_str, "id")).unwrap_or_default();
+            let owner = extract_string_field(req_str, "owner").unwrap_or_else(|| "task:default".to_string());
+            let session_id = extract_string_field(req_str, "session_id").unwrap_or_else(|| format!("session-{}", sand_protocol::now_ms()));
+            match mgr.acquire_lease(&runtime_id, &owner, &session_id) {
+                Ok(lease) => format!("{{\"ok\":true,\"lease_id\":\"{}\",\"runtime_id\":\"{}\",\"owner\":\"{}\",\"session_id\":\"{}\",\"created_at\":{}}}", lease.lease_id, lease.runtime_id, lease.owner.as_str(), lease.session_id, lease.created_at_ms),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        "ReleaseLease" => {
+            let lease_id = extract_string_field(req_str, "lease_id").unwrap_or_default();
+            let session_id = extract_string_field(req_str, "session_id");
+            let result = if let Some(sid) = session_id {
+                mgr.release_lease_by_session(&sid)
+            } else {
+                mgr.release_lease(&lease_id)
+            };
+            match result {
+                Ok(_) => format!("{{\"ok\":true}}"),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
+        }
+        "ListLeases" => {
+            let runtime_id = extract_string_field(req_str, "runtime_id").or_else(|| extract_string_field(req_str, "id"));
+            let leases = mgr.list_leases(runtime_id.as_deref());
+            let mut items = Vec::new();
+            for l in leases {
+                items.push(format!("{{\"lease_id\":\"{}\",\"runtime_id\":\"{}\",\"owner\":\"{}\",\"session_id\":\"{}\",\"active\":{}}}", l.lease_id, l.runtime_id, l.owner.as_str(), l.session_id, l.active));
+            }
+            format!("{{\"ok\":true,\"leases\":[{}]}}", items.join(","))
+        }
+        "TaskComplete" => {
+            let runtime_id = extract_string_field(req_str, "runtime_id").or_else(|| extract_string_field(req_str, "id")).unwrap_or_default();
+            let owner = extract_string_field(req_str, "owner").unwrap_or_else(|| format!("task:{}", runtime_id));
+            // Release all leases for this runtime? No, task complete+confirmed -> destroy runtime if no leases
+            // For now, try to destroy if task complete
+            match mgr.try_destroy_if_task_complete(&runtime_id, &owner) {
+                Ok(destroyed) => format!("{{\"ok\":true,\"runtime_id\":\"{}\",\"destroyed\":{}}}", runtime_id, destroyed),
+                Err(e) => format!("{{\"ok\":false,\"error\":\"{}\"}}", escape_json(&e)),
+            }
         }
         _ => {
             format!("{{\"ok\":false,\"error\":\"unknown method {}\"}}", escape_json(&method))

@@ -15,11 +15,12 @@ impl AgentSessionId {
 
 #[derive(Debug, Clone)]
 pub struct AgentSession {
-    pub id: AgentSessionId,
+    pub id: String, // use String for simplicity, compatible with AgentSessionId
     pub runtime_id: String,
     pub model: String,
     pub messages: Vec<Message>,
     pub tool_state: HashMap<String, String>,
+    pub metadata: HashMap<String, String>, // for checkpoint/recovery
     pub cwd: String,
     pub status: super::state::AgentStatus,
     pub created_at: u64,
@@ -75,11 +76,12 @@ impl AgentSession {
     pub fn new(runtime_id: String, model: String) -> Self {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         Self {
-            id: AgentSessionId::new(),
+            id: AgentSessionId::new().0,
             runtime_id,
             model,
             messages: Vec::new(),
             tool_state: HashMap::new(),
+            metadata: HashMap::new(),
             cwd: "/workspace".to_string(),
             status: super::state::AgentStatus::Idle,
             created_at: now,
@@ -123,11 +125,12 @@ impl AgentSession {
     pub fn handoff(&self, new_model: Option<String>) -> Self {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         Self {
-            id: AgentSessionId::new(),
+            id: AgentSessionId::new().0,
             runtime_id: self.runtime_id.clone(), // same runtime, new session
             model: new_model.unwrap_or_else(|| self.model.clone()),
             messages: vec![], // fresh messages, but could copy context
             tool_state: self.tool_state.clone(),
+            metadata: self.metadata.clone(),
             cwd: self.cwd.clone(),
             status: super::state::AgentStatus::Idle,
             created_at: now,

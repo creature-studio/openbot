@@ -137,7 +137,24 @@ fn extract_field(s: &str, field: &str) -> Option<String> {
     let pat = format!("\"{}\":\"", field);
     let start = s.find(&pat)?;
     let rest = &s[start+pat.len()..];
-    let end = rest.find('"')?;
+    // Handle escaped quotes: find closing " that is not preceded by \
+    let mut end = None;
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
+            end = Some(i);
+            break;
+        }
+    }
+    let end = end?;
     Some(rest[..end].to_string())
 }
 
@@ -186,12 +203,12 @@ impl Tool for BrowserOpenTool {
         }
 
         match call_browser_worker("/open", "POST", Some(&body)) {
-            Ok(resp) => Ok(ToolResult { content: format!("opened {}: {}", url, resp), is_error: false }),
+            Ok(resp) => Ok(ToolResult::success(format!("opened {}: {}", url, resp))),
             Err(e) => {
                 if e.contains("not running") {
-                    Ok(ToolResult { content: format!("browser-worker not running ({}). Auto-spawn attempted but needs Node+Playwright. Manual: cd sand/browser-worker && npm install && BROWSER_WORKER_PORT=9222 node src/index.js &", e), is_error: false })
+                    Ok(ToolResult::success(format!("browser-worker not running ({}). Auto-spawn attempted but needs Node+Playwright. Manual: cd sand/browser-worker && npm install && BROWSER_WORKER_PORT=9222 node src/index.js &", e)))
                 } else {
-                    Ok(ToolResult { content: format!("browser.open failed: {}", e), is_error: true })
+                    Ok(ToolResult::error(format!("browser.open failed: {}", e), None))
                 }
             }
         }
@@ -212,12 +229,12 @@ impl Tool for BrowserSnapshotTool {
                 if let Some(snap) = extract_field(&resp, "snapshot") {
                     // snapshot field is escaped, need unescape
                     let unescaped = snap.replace("\\n", "\n").replace("\\\"", "\"");
-                    Ok(ToolResult { content: format!("snapshot:\n{}", unescaped), is_error: false })
+                    Ok(ToolResult::success(format!("snapshot:\n{}", unescaped)))
                 } else {
-                    Ok(ToolResult { content: resp, is_error: false })
+                    Ok(ToolResult::success(resp))
                 }
             }
-            Err(e) => Ok(ToolResult { content: format!("browser.snapshot failed: {} - Phase 3C placeholder: would return [1] button \"Login\" etc.", e), is_error: false }),
+            Err(e) => Ok(ToolResult::success(format!("browser.snapshot failed: {} - Phase 3C placeholder: would return [1] button \"Login\" etc.", e))),
         }
     }
 }
@@ -234,8 +251,8 @@ impl Tool for BrowserClickTool {
         let r = extract_arg(args, "ref").or_else(|| extract_arg(args, "ref_id")).ok_or("missing ref")?;
         let body = format!(r#"{{"ref":"{}"}}"#, r);
         match call_browser_worker("/click", "POST", Some(&body)) {
-            Ok(resp) => Ok(ToolResult { content: format!("clicked {}: {}", r, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("browser.click failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("clicked {}: {}", r, resp))),
+            Err(e) => Ok(ToolResult::success(format!("browser.click failed: {}", e))),
         }
     }
 }
@@ -253,8 +270,8 @@ impl Tool for BrowserFillTool {
         let value = extract_arg(args, "value").ok_or("missing value")?;
         let body = format!(r#"{{"ref":"{}","value":"{}"}}"#, r, value.replace('"', "\\\""));
         match call_browser_worker("/fill", "POST", Some(&body)) {
-            Ok(resp) => Ok(ToolResult { content: format!("filled {}: {}", r, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("browser.fill failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("filled {}: {}", r, resp))),
+            Err(e) => Ok(ToolResult::success(format!("browser.fill failed: {}", e))),
         }
     }
 }
@@ -269,8 +286,8 @@ impl Tool for BrowserScreenshotTool {
     }
     fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
         match call_browser_worker("/screenshot", "POST", None) {
-            Ok(resp) => Ok(ToolResult { content: format!("screenshot: {}", resp.chars().take(200).collect::<String>()), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("browser.screenshot failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("screenshot: {}", resp.chars().take(200).collect::<String>()))),
+            Err(e) => Ok(ToolResult::success(format!("browser.screenshot failed: {}", e))),
         }
     }
 }
@@ -285,8 +302,8 @@ impl Tool for BrowserTabsTool {
     }
     fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
         match call_browser_worker("/tabs", "GET", None) {
-            Ok(resp) => Ok(ToolResult { content: resp, is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("browser.tabs failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(resp)),
+            Err(e) => Ok(ToolResult::success(format!("browser.tabs failed: {}", e))),
         }
     }
 }
@@ -303,8 +320,8 @@ impl Tool for BrowserPressTool {
         let key = extract_arg(args, "key").ok_or("missing key")?;
         let body = format!(r#"{{"key":"{}"}}"#, key);
         match call_browser_worker("/press", "POST", Some(&body)) {
-            Ok(resp) => Ok(ToolResult { content: format!("pressed {}: {}", key, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("browser.press failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("pressed {}: {}", key, resp))),
+            Err(e) => Ok(ToolResult::error(format!("browser.press failed: {}", e), None)),
         }
     }
 }

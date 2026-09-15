@@ -43,11 +43,11 @@ fn main() {
                     return;
                 }
             };
-            println!("[host-agent] created session {} runtime {}", session.id.0, session.runtime_id);
+            println!("[host-agent] created session {} runtime {}", session.id, session.runtime_id);
 
             // Save session initially
             if let Some(p) = &persistence {
-                let _ = p.save_session(&session.id.0, &session.runtime_id, &session.model, session.status.as_str(), session.goal.as_deref(), &session.cwd, session.created_at, session.updated_at, "[]");
+                let _ = p.save_session(&session.id, &session.runtime_id, &session.model, session.status.as_str(), session.goal.as_deref(), &session.cwd, session.created_at, session.updated_at, "[]");
             }
 
             session.add_system_message("You are a helpful assistant with tools: shell.exec, file.read, file.list, file.search, file.patch, terminal.open/write/read, browser.open/snapshot/click/fill, computer.*. Explore the project and answer. Prefer file.patch over shell for code changes.".to_string());
@@ -105,12 +105,16 @@ fn main() {
 
             let result = agent_loop.run(&mut session, model.as_ref(), &tools, |event| {
                 match event {
-                    host_agent::agent::LoopEvent::ModelCalled => println!("[loop] calling model..."),
-                    host_agent::agent::LoopEvent::ToolCallStarted { name, args } => println!("[loop] tool call: {} {}", name, args),
-                    host_agent::agent::LoopEvent::ToolCallFinished { name, result } => println!("[loop] tool result {}: {}", name, result.chars().take(500).collect::<String>()),
+                    host_agent::agent::LoopEvent::ModelCalled { iteration } => println!("[loop] calling model iteration {}...", iteration),
+                    host_agent::agent::LoopEvent::ToolCallStarted { name, args, call_id } => println!("[loop] tool call {} {} {}", call_id, name, args),
+                    host_agent::agent::LoopEvent::ToolCallFinished { name, result, call_id, status, duration_ms } => println!("[loop] tool result {} {} status={} duration={}ms: {}", call_id, name, status, duration_ms, result.chars().take(500).collect::<String>()),
                     host_agent::agent::LoopEvent::Completed { result } => println!("[loop] completed: {}", result),
                     host_agent::agent::LoopEvent::Failed { reason } => println!("[loop] failed: {}", reason),
                     host_agent::agent::LoopEvent::Attention { attention } => println!("[loop] attention: {:?}", attention),
+                    host_agent::agent::LoopEvent::Checkpoint { session_id, iteration } => println!("[loop] checkpoint session {} iter {}", session_id, iteration),
+                    host_agent::agent::LoopEvent::Recovery { session_id, from_iteration } => println!("[loop] recovery session {} from {}", session_id, from_iteration),
+                    host_agent::agent::LoopEvent::Budget { tokens_used, tool_calls, elapsed_ms } => println!("[loop] budget tokens={} calls={} elapsed={}ms", tokens_used, tool_calls, elapsed_ms),
+                    host_agent::agent::LoopEvent::ModelStreaming { content } => print!("{}", content),
                     _ => {}
                 }
             });
@@ -137,7 +141,7 @@ fn main() {
                 "create" => {
                     let api = HostAgentApi::new();
                     match api.create_session("gpt-4o-mini".to_string()) {
-                        Ok(s) => println!("created session {} runtime {}", s.id.0, s.runtime_id),
+                        Ok(s) => println!("created session {} runtime {}", s.id, s.runtime_id),
                         Err(e) => eprintln!("error: {}", e),
                     }
                 }

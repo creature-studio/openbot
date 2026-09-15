@@ -71,26 +71,31 @@ impl Supervisor {
         let mut actions = Vec::new();
         for (id, desired) in desired_map.iter() {
             let observed = self.get_observed(id);
+            // Runtime kernel should only: discover, record, report, cleanup
+            // It should NOT auto-create or auto-restart, that is up to Agent/Task policy
             if desired.should_exist && !observed.exists {
-                // Should create
-                eprintln!("[supervisor] desired {} exists but observed missing, would create", id);
-                actions.push(format!("create {}", id));
-                // In real system, we'd create here
-                // For MVP, just log
+                // Should exist but missing -> report as failed, let upper layer decide to recreate
+                eprintln!("[supervisor] OBSERVED: desired {} should_exist=true but observed missing -> report failed, NOT auto-creating (upper layer decides)", id);
+                actions.push(format!("report missing {} (should_exist but not found)", id));
+                // Emit event via EventBus? For now just log, upper layer will see via GetObservedState
+                // Do NOT auto-create
             } else if !desired.should_exist && observed.exists {
-                eprintln!("[supervisor] desired {} not exist but observed exists, destroying", id);
+                // Should NOT exist but exists -> cleanup (this is allowed: kernel cleans up)
+                eprintln!("[supervisor] OBSERVED: desired {} should_exist=false but observed exists -> cleanup destroying", id);
                 let rid = RuntimeId::from_string(id.clone());
                 if self.runtime_mgr.destroy_runtime(&rid).is_ok() {
-                    actions.push(format!("destroyed {}", id));
+                    actions.push(format!("cleaned up destroyed {}", id));
                 }
             } else if desired.should_running && !observed.running && observed.exists {
-                eprintln!("[supervisor] desired {} running but observed not, restarting?", id);
-                actions.push(format!("restart {}", id));
+                // Should be running but not -> report failed, NOT auto-restart
+                eprintln!("[supervisor] OBSERVED: desired {} should_running=true but observed running=false state={} -> report failed, NOT auto-restart (Task policy decides)", id, if observed.exists { "stopped" } else { "missing" });
+                actions.push(format!("report not_running {} (should_running but stopped)", id));
+                // Do NOT auto-restart
             }
-            // Check procs
+            // Check procs - just report
             if observed.exists && desired.min_procs > 0 && observed.procs < desired.min_procs {
-                eprintln!("[supervisor] runtime {} has {} procs < desired {}", id, observed.procs, desired.min_procs);
-                actions.push(format!("low procs {}: {} < {}", id, observed.procs, desired.min_procs));
+                eprintln!("[supervisor] OBSERVED: runtime {} has {} procs < desired {} -> report low", id, observed.procs, desired.min_procs);
+                actions.push(format!("report low procs {}: {} < {}", id, observed.procs, desired.min_procs));
             }
         }
         actions

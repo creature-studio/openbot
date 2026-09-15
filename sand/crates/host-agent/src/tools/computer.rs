@@ -180,15 +180,15 @@ impl Tool for ComputerScreenshotTool {
         if !runtime_id.is_empty() {
             if let Ok(data) = try_screenshot_via_sandd(runtime_id) {
                 let b64 = base64_encode(&data);
-                return Ok(ToolResult { content: format!("screenshot via sandd {} bytes, base64 length {} (binary RPC, no base64 overhead in transport)", data.len(), b64.len()), is_error: false });
+                return Ok(ToolResult::success(format!("screenshot via sandd {} bytes, base64 length {} (binary RPC, no base64 overhead in transport)", data.len(), b64.len())));
             }
         }
         match try_screenshot() {
             Ok(data) => {
                 let b64 = base64_encode(&data);
-                Ok(ToolResult { content: format!("screenshot taken {} bytes, base64 length {}", data.len(), b64.len()), is_error: false })
+                Ok(ToolResult::success(format!("screenshot taken {} bytes, base64 length {}", data.len(), b64.len())))
             }
-            Err(e) => Ok(ToolResult { content: format!("computer.screenshot not available in this env ({}). In real desktop env would use X11 XShm via sandd EnsureDisplay+Screenshot binary RPC.", e), is_error: false }),
+            Err(e) => Ok(ToolResult::success(format!("computer.screenshot not available in this env ({}). In real desktop env would use X11 XShm via sandd EnsureDisplay+Screenshot binary RPC.", e))),
         }
     }
 }
@@ -205,8 +205,8 @@ impl Tool for ComputerClickTool {
         let x = extract_number(args, "x").unwrap_or(0);
         let y = extract_number(args, "y").unwrap_or(0);
         match try_click(x, y, runtime_id) {
-            Ok(_) => Ok(ToolResult { content: format!("clicked at {},{} via runtime {}", x, y, runtime_id), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("computer.click placeholder ({}): would click at {},{} via XTest in real env. Uses sandd GetDisplay+exec xdotool.", e, x, y), is_error: false }),
+            Ok(_) => Ok(ToolResult::success(format!("clicked at {},{} via runtime {}", x, y, runtime_id))),
+            Err(e) => Ok(ToolResult::success(format!("computer.click placeholder ({}): would click at {},{} via XTest in real env. Uses sandd GetDisplay+exec xdotool.", e, x, y))),
         }
     }
 }
@@ -222,8 +222,8 @@ impl Tool for ComputerTypeTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let text = extract_arg(args, "text").unwrap_or_default();
         match try_type(&text, runtime_id) {
-            Ok(_) => Ok(ToolResult { content: format!("typed: {} via runtime {}", text, runtime_id), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("computer.type placeholder ({}): would type '{}' via XTest.", e, text), is_error: false }),
+            Ok(_) => Ok(ToolResult::success(format!("typed: {} via runtime {}", text, runtime_id))),
+            Err(e) => Ok(ToolResult::success(format!("computer.type placeholder ({}): would type '{}' via XTest.", e, text))),
         }
     }
 }
@@ -239,7 +239,7 @@ impl Tool for ComputerMoveTool {
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
         let x = extract_number(args, "x").unwrap_or(0);
         let y = extract_number(args, "y").unwrap_or(0);
-        Ok(ToolResult { content: format!("computer.move placeholder: would move to {},{} via XTest", x, y), is_error: false })
+        Ok(ToolResult::success(format!("computer.move placeholder: would move to {},{} via XTest", x, y)))
     }
 }
 
@@ -253,7 +253,7 @@ impl Tool for ComputerKeyTool {
     }
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
         let key = extract_arg(args, "key").unwrap_or_default();
-        Ok(ToolResult { content: format!("computer.key placeholder: would press {} via XTest", key), is_error: false })
+        Ok(ToolResult::success(format!("computer.key placeholder: would press {} via XTest", key)))
     }
 }
 
@@ -268,7 +268,7 @@ impl Tool for ComputerScrollTool {
     fn execute(&self, args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
         let dx = extract_number(args, "dx").unwrap_or(0);
         let dy = extract_number(args, "dy").unwrap_or(0);
-        Ok(ToolResult { content: format!("computer.scroll placeholder: would scroll {},{} via XTest", dx, dy), is_error: false })
+        Ok(ToolResult::success(format!("computer.scroll placeholder: would scroll {},{} via XTest", dx, dy)))
     }
 }
 

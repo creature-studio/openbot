@@ -22,11 +22,11 @@ impl Tool for ShellExecTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let command = extract_arg(args, "command").ok_or("missing command")?;
 
-        // Permission / destructive check -> Attention
+        // Permission / destructive check -> Attention with unified ToolResult
         let destructive_patterns = ["rm -rf /", "rm -r /", "mkfs", "dd if=", ":(){:|:&};:", "chmod -R 777 /", "> /dev/sda"];
         for pat in destructive_patterns {
             if command.contains(pat) {
-                return Ok(ToolResult { content: format!("permission_required: destructive command '{}' needs approval for pattern '{}' [tool: shell.exec]", command, pat), is_error: true });
+                return Ok(super::ToolResult::permission_required("shell.exec".to_string(), format!("destructive command '{}' pattern '{}'", command, pat)));
             }
         }
         let ask_patterns = ["git push", "secret", "external"];
@@ -36,12 +36,21 @@ impl Tool for ShellExecTool {
             }
         }
         // Use sand-client binary exec for efficiency (no base64)
+        let start = std::time::SystemTime::now();
         let cmd_vec = vec!["bash".to_string(), "-lc".to_string(), command.clone()];
         match self.sand_client.exec_binary(runtime_id, cmd_vec) {
             Ok((json_resp, stdout, stderr)) => {
                 let exit_code = extract_number_field(&json_resp, "exit_code").unwrap_or(0);
+                let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
                 let content = format!("exit_code: {}\nstdout (binary RPC, {} bytes, no base64):\n{}\nstderr:\n{}", exit_code, stdout.len(), String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
-                Ok(ToolResult { content, is_error: exit_code != 0 })
+                let mut result = if exit_code == 0 {
+                    super::ToolResult::success(content)
+                } else {
+                    super::ToolResult::error(content, Some("PROCESS_EXIT_NONZERO".to_string()))
+                };
+                result.tool_name = "shell.exec".to_string();
+                result.duration_ms = duration;
+                Ok(result)
             }
             Err(_) => {
                 // Fallback to JSON RPC
@@ -51,10 +60,18 @@ impl Tool for ShellExecTool {
                         let stdout = extract_b64_field(&resp, "stdout_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
                         let stderr = extract_b64_field(&resp, "stderr_b64").map(|b64| base64_decode(&b64)).unwrap_or_default();
                         let exit_code = extract_number_field(&resp, "exit_code").unwrap_or(0);
+                        let duration = start.elapsed().unwrap_or_default().as_millis() as u64;
                         let content = format!("exit_code: {}\nstdout:\n{}\nstderr:\n{}", exit_code, String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
-                        Ok(ToolResult { content, is_error: exit_code != 0 })
+                        let mut result = if exit_code == 0 {
+                            super::ToolResult::success(content)
+                        } else {
+                            super::ToolResult::error(content, Some("PROCESS_EXIT_NONZERO".to_string()))
+                        };
+                        result.tool_name = "shell.exec".to_string();
+                        result.duration_ms = duration;
+                        Ok(result)
                     }
-                    Err(e) => Ok(ToolResult { content: format!("exec failed: {}", e), is_error: true }),
+                    Err(e) => Ok(super::ToolResult::error(format!("exec failed: {}", e), Some("EXEC_FAILED".to_string()))),
                 }
             }
         }

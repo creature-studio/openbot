@@ -33,8 +33,8 @@ impl Tool for TerminalResizeTool {
         let cols = extract_number(args, "cols").unwrap_or(80);
         let rows = extract_number(args, "rows").unwrap_or(24);
         match self.client.resize_pty(runtime_id, &pty_id, cols as u16, rows as u16) {
-            Ok(resp) => Ok(ToolResult { content: format!("resized {} to {}x{}: {}", pty_id, cols, rows, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("resize failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("resized {} to {}x{}: {}", pty_id, cols, rows, resp))),
+            Err(e) => Ok(ToolResult::error(format!("resize failed: {}", e), None)),
         }
     }
 }
@@ -43,35 +43,30 @@ impl Tool for TerminalSignalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "terminal.signal".to_string(),
-            description: "Send signal to PTY: Ctrl+C = SIGINT (2), Ctrl+D via EOF, SIGTERM (15), SIGKILL (9), SIGTSTP Ctrl+Z (20). Supports signal names: SIGINT, CtrlC, CtrlD, SIGTERM, etc. Handles raw mode and ANSI.".to_string(),
+            description: "Send signal to PTY: Ctrl+C = SIGINT (2), Ctrl+D via EOF, SIGTERM (15), SIGKILL (9), SIGTSTP Ctrl+Z (20). Supports signal names: SIGINT, CtrlC, CtrlD, SIGTERM, etc. Handles raw mode and ANSI. Uses tcgetpgrp+kill(-pgid) for foreground group.".to_string(),
             parameters_schema: r#"{"type":"object","properties":{"pty_id":{"type":"string"},"signal":{"type":"string","description":"signal number or name: 2/SIGINT/CtrlC, 15/SIGTERM, 9/SIGKILL, 20/CtrlZ, CtrlD"}},"required":["pty_id"]}"#.to_string(),
         }
     }
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         let signal = extract_arg(args, "signal").unwrap_or_else(|| "SIGINT".to_string());
-        // Handle CtrlD specially: send EOF byte 0x04 via WritePty binary
         if signal.to_lowercase() == "ctrld" || signal.to_lowercase() == "ctrl_d" || signal == "\x04" || signal == "4" || signal.to_lowercase() == "eof" {
             match self.client.write_pty_binary(runtime_id, &pty_id, &[0x04]) {
-                Ok(resp) => return Ok(ToolResult { content: format!("sent Ctrl+D (EOF 0x04) to {}: {}", pty_id, resp), is_error: false }),
-                Err(e) => return Ok(ToolResult { content: format!("CtrlD failed: {}", e), is_error: true }),
+                Ok(resp) => return Ok(ToolResult::success(format!("sent Ctrl+D (EOF 0x04) to {}: {}", pty_id, resp))),
+                Err(e) => return Ok(ToolResult::error(format!("CtrlD failed: {}", e), None)),
             }
         }
-        // Handle CtrlC as signal or byte
         if signal.to_lowercase() == "ctrlc" || signal.to_lowercase() == "ctrl_c" {
-            // Try signal first, fallback to byte 0x03
             if let Ok(resp) = self.client.signal_pty_str(runtime_id, &pty_id, "SIGINT") {
                 if resp.contains("\"ok\":true") {
-                    return Ok(ToolResult { content: format!("sent Ctrl+C SIGINT to {}: {}", pty_id, resp), is_error: false });
+                    return Ok(ToolResult::success(format!("sent Ctrl+C SIGINT to {}: {}", pty_id, resp)));
                 }
             }
-            // Fallback to byte
             match self.client.write_pty_binary(runtime_id, &pty_id, &[0x03]) {
-                Ok(resp) => return Ok(ToolResult { content: format!("sent Ctrl+C (0x03) to {}: {}", pty_id, resp), is_error: false }),
-                Err(e) => return Ok(ToolResult { content: format!("CtrlC failed: {}", e), is_error: true }),
+                Ok(resp) => return Ok(ToolResult::success(format!("sent Ctrl+C (0x03) to {}: {}", pty_id, resp))),
+                Err(e) => return Ok(ToolResult::error(format!("CtrlC failed: {}", e), None)),
             }
         }
-        // Generic signal
         let resp = if signal.parse::<i32>().is_ok() {
             let num: i32 = signal.parse().unwrap();
             self.client.signal_pty(runtime_id, &pty_id, num)
@@ -79,8 +74,8 @@ impl Tool for TerminalSignalTool {
             self.client.signal_pty_str(runtime_id, &pty_id, &signal)
         };
         match resp {
-            Ok(r) => Ok(ToolResult { content: format!("signal {} to {}: {}", signal, pty_id, r), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("signal failed: {}", e), is_error: true }),
+            Ok(r) => Ok(ToolResult::success(format!("signal {} to {}: {}", signal, pty_id, r))),
+            Err(e) => Ok(ToolResult::error(format!("signal failed: {}", e), None)),
         }
     }
 }
@@ -96,8 +91,8 @@ impl Tool for TerminalCloseTool {
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         let pty_id = extract_arg(args, "pty_id").ok_or("missing pty_id")?;
         match self.client.close_pty(runtime_id, &pty_id) {
-            Ok(resp) => Ok(ToolResult { content: format!("closed {}: {}", pty_id, resp), is_error: false }),
-            Err(e) => Ok(ToolResult { content: format!("close failed: {}", e), is_error: true }),
+            Ok(resp) => Ok(ToolResult::success(format!("closed {}: {}", pty_id, resp))),
+            Err(e) => Ok(ToolResult::error(format!("close failed: {}", e), None)),
         }
     }
 }
