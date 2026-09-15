@@ -27,7 +27,7 @@
 //! where a degraded/unreachable machine explains itself.
 
 use gpui::{
-    div, prelude::*, Context, Entity, IntoElement, Render, SharedString, ViewContext,
+    div, px, prelude::*, App, Context, Entity, IntoElement, Render, SharedString, Window,
 };
 use crate::stores::{BotStore, TaskStore, WorkbenchStore, MachineStore};
 use crate::machine::MachinePanel;
@@ -46,7 +46,7 @@ impl Sidebar {
         tasks: Entity<TaskStore>,
         workbenches: Entity<WorkbenchStore>,
         machines: Entity<MachineStore>,
-        cx: &mut ViewContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&bots, |_, _, cx| cx.notify()).detach();
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
@@ -62,15 +62,15 @@ impl Sidebar {
 }
 
 impl Render for Sidebar {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .h_full()
             .w(px(220.0))
-            .bg(cx.theme().colors().panel_background)
+            .bg(gpui::rgb(0x111827))
             .border_r_1()
-            .border_color(cx.theme().colors().border)
+            .border_color(gpui::rgb(0x2d3748))
             .p_2()
             .gap_4()
             .child(self.render_bots(cx))
@@ -96,7 +96,7 @@ impl Sidebar {
             .child(body)
     }
 
-    fn render_bots(&self, cx: &ViewContext<Self>) -> impl IntoElement {
+    fn render_bots(&self, cx: &App) -> impl IntoElement {
         let bots = self.bots.read(cx);
         let mut list = div().flex().flex_col().gap_1();
         for bot in &bots.bots {
@@ -112,7 +112,7 @@ impl Sidebar {
         Self::section("BOT", list)
     }
 
-    fn render_tasks(&self, cx: &ViewContext<Self>) -> impl IntoElement {
+    fn render_tasks(&self, cx: &App) -> impl IntoElement {
         let tasks = self.tasks.read(cx);
         let mut list = div().flex().flex_col().gap_1();
         for id in &tasks.order {
@@ -142,7 +142,7 @@ impl Sidebar {
         Self::section("TASKS", list)
     }
 
-    fn render_workbenches(&self, cx: &ViewContext<Self>) -> impl IntoElement {
+    fn render_workbenches(&self, cx: &App) -> impl IntoElement {
         let workbenches = self.workbenches.read(cx);
         let mut list = div().flex().flex_col().gap_1();
         for workbench in &workbenches.workbenches {
@@ -164,7 +164,7 @@ impl Sidebar {
         Self::section("WORKBENCH", list)
     }
 
-    fn render_machines(&self, cx: &ViewContext<Self>) -> impl IntoElement {
+    fn render_machines(&self, cx: &App) -> impl IntoElement {
         let machines = self.machines.read(cx);
 
         let mut list = div().flex().flex_col().gap_1();

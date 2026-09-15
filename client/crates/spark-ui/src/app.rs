@@ -13,7 +13,7 @@
 //! tab show that anything is remote.
 
 use gpui::{
-    div, prelude::*, AppContext, Context, Entity, EventEmitter, IntoElement, Render, ViewContext,
+    div, prelude::*, App, Context, Entity, EventEmitter, IntoElement, Render, Window,
 };
 use spark_model::*;
 use spark_transport::{Transport, TransportCommand, TransportEvent};
@@ -60,7 +60,7 @@ impl EventEmitter<AppEvent> for AppState {}
 impl AppState {
     /// Build the store tree and the transport. The returned entity owns the
     /// command receiver; hand it to the task that writes to host-agent's socket.
-    pub fn new(server_url: impl Into<String>, cx: &mut AppContext) -> Entity<Self> {
+    pub fn new(server_url: impl Into<String>, cx: &mut App) -> Entity<Self> {
         let (transport, commands) = Transport::new(server_url);
         let command_tx = transport.command_sender();
 
@@ -307,7 +307,7 @@ pub struct RootView {
 }
 
 impl RootView {
-    pub fn new(state: Entity<AppState>, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
 
         // Copy the entity handles out of the read guard first: `cx.new` needs a
@@ -341,7 +341,7 @@ impl RootView {
     }
 
     /// Pull everything host-agent sent into the stores, then draw.
-    fn drain(&mut self, cx: &mut ViewContext<Self>) {
+    fn drain(&mut self, cx: &mut Context<Self>) {
         let events = crate::link::take_events();
         if events.is_empty() {
             return;
@@ -355,7 +355,7 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain(cx);
 
         // Clone what the element needs: a GPUI read guard cannot outlive the
@@ -369,7 +369,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(cx.theme().colors().background)
+            .bg(gpui::rgb(0x0f172a))
             .child(
                 div()
                     .flex()

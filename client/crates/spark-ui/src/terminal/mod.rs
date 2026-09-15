@@ -80,6 +80,7 @@ impl TerminalPanel {
                 .bg(gpui::rgb(0x0c0c0c))
                 .font_family("monospace")
                 .text_xs()
+                .id("terminal-output-scroll")
                 .overflow_y_scroll()
                 .child(
                     div()

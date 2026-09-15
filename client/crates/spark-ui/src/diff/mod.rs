@@ -133,6 +133,7 @@ impl DiffPanel {
                         .bg(gpui::rgb(0x0f172a))
                         .font_family("monospace")
                         .text_xs()
+                        .id("diff-view-scroll")
                         .overflow_y_scroll()
                         .children(diff_text.lines().map(|line| {
                             let (bg, fg) = if line.starts_with('+') {

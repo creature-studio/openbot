@@ -37,7 +37,7 @@
 //! ```
 
 use gpui::{
-    div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
+    div, px, prelude::*, Context, Entity, IntoElement, Render, SharedString, Window,
 };
 use spark_model::*;
 use crate::stores::TaskStore;
@@ -49,7 +49,7 @@ pub struct TaskTimeline {
 }
 
 impl TaskTimeline {
-    pub fn new(tasks: Entity<TaskStore>, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(tasks: Entity<TaskStore>, cx: &mut Context<Self>) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
 
         Self {
@@ -68,7 +68,7 @@ impl TaskTimeline {
 }
 
 impl Render for TaskTimeline {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tasks = self.tasks.read(cx);
         let selected = tasks.selected_task();
 
@@ -103,13 +103,14 @@ impl Render for TaskTimeline {
         let mut items_div = div().flex().flex_col().gap_1().px_4().py_2();
 
         for item in &task.timeline {
-            items_div = items_div.child(self.render_timeline_item(item, cx));
+            items_div = items_div.child(self.render_timeline_item(item));
         }
 
         div()
             .flex()
             .flex_col()
             .h_full()
+            .id("task-timeline-scroll")
             .overflow_y_scroll()
             .child(header)
             .child(status)
@@ -118,11 +119,7 @@ impl Render for TaskTimeline {
 }
 
 impl TaskTimeline {
-    fn render_timeline_item(
-        &self,
-        item: &TimelineItem,
-        _cx: &mut ViewContext<Self>,
-    ) -> impl IntoElement {
+    fn render_timeline_item(&self, item: &TimelineItem) -> impl IntoElement {
         match item {
             TimelineItem::UserMessage(msg) => self.render_user_message(msg),
             TimelineItem::AssistantMessage(msg) => self.render_assistant_message(msg),
@@ -159,11 +156,9 @@ impl TaskTimeline {
                 .when(msg.streaming, |d| {
                     d.child(
                         div()
-                            .inline_block()
                             .w(px(2.0))
                             .h(px(14.0))
-                            .bg(gpui::rgb(0x3b82f6))
-                            .animate(),
+                            .bg(gpui::rgb(0x3b82f6)),
                     )
                 })
                 .child(msg.content.clone()),
@@ -291,6 +286,7 @@ impl TaskTimeline {
                         .text_xs()
                         .font_family("monospace")
                         .max_h(px(200.0))
+                        .id(SharedString::from(format!("tool-output-{}", tool.call_id)))
                         .overflow_y_scroll()
                         .child(truncate_str(output, 2000)),
                 );

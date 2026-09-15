@@ -13,7 +13,7 @@
 //! - ⌘K shortcut for command palette (future)
 
 use gpui::{
-    div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
+    div, prelude::*, App, Context, Entity, IntoElement, Render, Window,
 };
 use spark_model::TaskId;
 use crate::stores::TaskStore;
@@ -36,7 +36,7 @@ impl Composer {
     pub fn new(
         tasks: Entity<TaskStore>,
         connection: Entity<ConnectionStore>,
-        cx: &mut ViewContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
 
@@ -48,7 +48,7 @@ impl Composer {
         }
     }
 
-    fn has_running_task(&self, cx: &ViewContext<Self>) -> bool {
+    fn has_running_task(&self, cx: &App) -> bool {
         self.tasks
             .read(cx)
             .selected_task()
@@ -62,7 +62,7 @@ impl Composer {
 }
 
 impl Render for Composer {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_running = self.has_running_task(cx);
         let can_send = self.can_send();
 
@@ -72,9 +72,9 @@ impl Render for Composer {
             .gap_2()
             .px_4()
             .py_3()
-            .bg(cx.theme().colors().panel_background)
+            .bg(gpui::rgb(0x111827))
             .border_t_1()
-            .border_color(cx.theme().colors().border)
+            .border_color(gpui::rgb(0x2d3748))
             .child(
                 // Text input
                 div()
