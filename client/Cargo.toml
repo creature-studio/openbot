@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/spark-client",
+    "crates/spark-ui",
+    "crates/spark-model",
+    "crates/spark-transport",
+    "crates/spark-terminal",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# GPUI — pin to a known commit or crates.io release
+# Current crates.io version: 0.2.2 (https://docs.rs/crate/gpui/latest)
+# For real builds, use: gpui = { git = "https://github.com/zed-industries/zed.git", rev = "..." }
+gpui = "0.2.2"
+
+# Model / Transport
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+dashmap = "6"
+
+# Terminal (VT parser)
+alacritty_terminal = "0.25"

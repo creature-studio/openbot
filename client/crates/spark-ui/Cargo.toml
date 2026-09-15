@@ -1,0 +1,17 @@
+[package]
+name = "spark-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+spark-model = { path = "../spark-model" }
+spark-transport = { path = "../spark-transport" }
+spark-terminal = { path = "../spark-terminal" }
+gpui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
