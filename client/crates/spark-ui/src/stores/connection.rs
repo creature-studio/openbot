@@ -1,6 +1,6 @@
 //! ConnectionStore: manages connection state to host-agent.
 
-use gpui::{Context, Entity, EventEmitter};
+use gpui::{Context, EventEmitter};
 use spark_model::ConnectionStatus;
 use spark_transport::TransportCommand;
 use tokio::sync::mpsc;

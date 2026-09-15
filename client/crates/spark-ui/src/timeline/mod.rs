@@ -58,6 +58,7 @@ impl TaskTimeline {
         }
     }
 
+    #[allow(dead_code)] // wired to tool-card click handlers next
     fn toggle_tool(&mut self, id: &str) {
         if self.expanded_tools.contains(id) {
             self.expanded_tools.remove(id);

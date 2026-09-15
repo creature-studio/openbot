@@ -371,6 +371,7 @@ pub struct SshTransport {
     /// Push-frame sink for events.
     events: EventSink,
     /// True while the machine is in the middle of a reconnect attempt.
+    #[allow(dead_code)] // polled by reconnect supervision (not yet wired)
     reconnecting: AtomicBool,
 }
 
