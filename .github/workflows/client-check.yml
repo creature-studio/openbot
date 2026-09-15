@@ -40,20 +40,28 @@ jobs:
 
       # The sandbox running this agent cannot download Actions logs, so mirror
       # the failure output into check annotations (readable via the API).
-      - name: Report failure head
+      - name: Report failure lines 1-9
         if: failure()
         run: |
           n=$(wc -l < /tmp/check.log)
-          echo "::error::cargo check failed, check.log has $n lines. First lines:"
-          head -9 /tmp/check.log | while IFS= read -r line; do
-            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[head] $safe"
+          echo "::error::cargo check failed, check.log has $n lines."
+          sed -n '1,9p' /tmp/check.log | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[$n] $safe"
           done
 
-      - name: Report failure tail
+      - name: Report failure lines 10-18
         if: failure()
         run: |
-          tail -9 /tmp/check.log | while IFS= read -r line; do
-            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
-            echo "::error::[tail] $safe"
+          sed -n '10,18p' /tmp/check.log | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[mid] $safe"
+          done
+
+      - name: Report failure lines 19-27
+        if: failure()
+        run: |
+          sed -n '19,27p' /tmp/check.log | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[19+] $safe"
           done
