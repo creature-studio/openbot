@@ -58,6 +58,10 @@ use spark_transport::{BootstrapSummary, RuntimeInfo};
 use spark_transport::MachineDraft;
 
 use crate::agent::{AgentSession, AgentLoop, TaskManager};
+use crate::agent::session::Message;
+use crate::agent::state::AgentStatus;
+use crate::agent::task::Task;
+use crate::agent::state::TaskStatus;
 use crate::machine::{MachineEvent, MachineManager};
 use crate::model::{Model, MockModel, OpenAICompatibleModel};
 use crate::tools::ToolExecutionContext;
@@ -92,10 +96,71 @@ struct ServeState {
 }
 
 impl ServeState {
-    fn new() -> Self {
+    fn new(manager: &MachineManager) -> Self {
+        let mut sessions = HashMap::new();
+        let mut tasks = TaskManager::new();
+        if let Some(persistence) = manager.persistence() {
+            match persistence.load_sessions() {
+                Ok(rows) => {
+                    for row in rows {
+                        let status = match row.status.as_str() {
+                            "running" => AgentStatus::Running,
+                            "waiting_input" => AgentStatus::WaitingInput,
+                            "ready_for_check" => AgentStatus::ReadyForCheck,
+                            "completed" => AgentStatus::Completed,
+                            "failed" => AgentStatus::Failed { reason: "recovered failed session".into() },
+                            _ => AgentStatus::Idle,
+                        };
+                        let messages = serde_json::from_str::<Vec<Message>>(&row.messages)
+                            .unwrap_or_default();
+                        sessions.insert(row.id.clone(), AgentSession {
+                            id: row.id,
+                            runtime_id: row.runtime_id,
+                            machine_id: MachineId::from_string(row.machine_id),
+                            model: row.model,
+                            messages,
+                            tool_state: HashMap::new(),
+                            metadata: HashMap::new(),
+                            cwd: row.cwd,
+                            status,
+                            created_at: row.created_at,
+                            updated_at: row.updated_at,
+                            goal: row.goal,
+                        });
+                    }
+                }
+                Err(error) => tracing::warn!("cannot recover sessions: {error}"),
+            }
+            match persistence.load_tasks() {
+                Ok(rows) => {
+                    for row in rows {
+                        let status = match row.status.as_str() {
+                            "running" => TaskStatus::Running,
+                            "waiting_approval" => TaskStatus::WaitingApproval,
+                            "completed" => TaskStatus::Completed,
+                            "failed" => TaskStatus::Failed,
+                            "cancelled" => TaskStatus::Cancelled,
+                            _ => TaskStatus::Pending,
+                        };
+                        tasks.restore(Task {
+                            id: row.id,
+                            goal: row.goal,
+                            session_id: row.session_id,
+                            runtime_id: row.runtime_id,
+                            status,
+                            artifacts: serde_json::from_str(&row.artifacts).unwrap_or_default(),
+                            result: row.result,
+                            created_at: row.created_at,
+                            updated_at: row.updated_at,
+                        });
+                    }
+                }
+                Err(error) => tracing::warn!("cannot recover tasks: {error}"),
+            }
+        }
         Self {
-            sessions: Mutex::new(HashMap::new()),
-            tasks: Mutex::new(TaskManager::new()),
+            sessions: Mutex::new(sessions),
+            tasks: Mutex::new(tasks),
             cancel_flags: Mutex::new(HashMap::new()),
             pending_messages: Mutex::new(HashMap::new()),
         }
@@ -104,7 +169,7 @@ impl ServeState {
 
 /// Serve until `shutdown` or SIGTERM.
 pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -> Result<()> {
-    let state = Arc::new(ServeState::new());
+    let state = Arc::new(ServeState::new(&manager));
     let socket_path = socket_path.unwrap_or_else(default_socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
@@ -136,16 +201,32 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
     // then publish the machine's runtime inventory so the client can reattach.
     {
         let manager = manager.clone();
+        let state = state.clone();
         let broadcast_tx = broadcast_tx.clone();
         tokio::spawn(async move {
             for machine in manager.list_machines() {
                 if matches!(machine.kind, spark_model::MachineKind::Local) {
+                    if let Ok(runtimes) = manager.list_runtimes(&machine.id).await {
+                        let _ = broadcast_tx.send(runtimes_json(&machine.id, &runtimes));
+                    }
+                    recover_persisted_tasks_for_machine(
+                        &manager,
+                        &state,
+                        &broadcast_tx,
+                        &machine.id,
+                    );
                     continue;
                 }
                 if manager.connect_machine(&machine.id).await.is_ok() {
                     if let Ok(runtimes) = manager.list_runtimes(&machine.id).await {
                         let _ = broadcast_tx.send(runtimes_json(&machine.id, &runtimes));
                     }
+                    recover_persisted_tasks_for_machine(
+                        &manager,
+                        &state,
+                        &broadcast_tx,
+                        &machine.id,
+                    );
                 }
             }
         });
@@ -194,8 +275,12 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
             });
 
             // Send the current state immediately: the client renders the sidebar
-            // without asking.
+            // without asking. Persisted tasks are replayed as the same event
+            // shape as newly-created tasks, so the GPUI client has one model.
             let _ = reply_tx.send(machines_json(&manager));
+            for task_line in restored_task_events(&state) {
+                let _ = reply_tx.send(task_line);
+            }
 
             while let Ok(Some(line)) = lines.next_line().await {
                 let line = line.trim().to_string();
@@ -658,6 +743,60 @@ async fn handle_command(
     }
 }
 
+fn recover_persisted_tasks_for_machine(
+    manager: &Arc<MachineManager>,
+    state: &Arc<ServeState>,
+    broadcast_tx: &tokio::sync::broadcast::Sender<String>,
+    machine_id: &MachineId,
+) {
+    let candidates = state
+        .tasks
+        .lock()
+        .ok()
+        .map(|tasks| {
+            tasks
+                .list()
+                .into_iter()
+                .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+                .filter_map(|task| {
+                    let session = state
+                        .sessions
+                        .lock()
+                        .ok()
+                        .and_then(|sessions| sessions.get(&task.session_id).cloned())?;
+                    (session.machine_id == *machine_id).then_some((task.clone(), session))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    for (task, session) in candidates {
+        let already_running = state
+            .cancel_flags
+            .lock()
+            .ok()
+            .map(|flags| flags.contains_key(&task.id))
+            .unwrap_or(true);
+        if already_running {
+            continue;
+        }
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        if let Ok(mut flags) = state.cancel_flags.lock() {
+            flags.insert(task.id.clone(), cancel_flag.clone());
+        }
+        spawn_agent_task(
+            manager.clone(),
+            state.clone(),
+            broadcast_tx.clone(),
+            task.id,
+            session.id.clone(),
+            session,
+            machine_id.clone(),
+            cancel_flag,
+        );
+    }
+}
+
 /// Run one task outside the Tokio worker threads and stream normalized AgentLoop
 /// events to every connected client. The runtime is deliberately not owned by
 /// this worker: cancellation only flips the loop flag, while runtime destroy
@@ -1031,6 +1170,31 @@ fn error_json(cmd: &str, message: &str) -> String {
         escape(cmd),
         escape(message)
     )
+}
+
+fn restored_task_events(state: &ServeState) -> Vec<String> {
+    let tasks = match state.tasks.lock() {
+        Ok(tasks) => tasks.list().into_iter().cloned().collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+    let sessions = match state.sessions.lock() {
+        Ok(sessions) => sessions,
+        Err(_) => return Vec::new(),
+    };
+    tasks
+        .into_iter()
+        .filter_map(|task| {
+            let session = sessions.get(&task.session_id)?;
+            Some(format!(
+                "{{\"event\":\"task_created\",\"task_id\":\"{}\",\"session_id\":\"{}\",\"machine_id\":\"{}\",\"runtime_id\":\"{}\",\"goal\":\"{}\"}}",
+                escape(&task.id),
+                escape(&task.session_id),
+                escape(session.machine_id.as_str()),
+                escape(&task.runtime_id),
+                escape(&task.goal)
+            ))
+        })
+        .collect()
 }
 
 /// Map a manager event onto the client protocol.

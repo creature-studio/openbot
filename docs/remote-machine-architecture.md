@@ -272,4 +272,4 @@ sand/test_remote_ssh.sh
 * bootstrap 只支持 `linux-x86_64` / `linux-aarch64`。
 * `computer.*` 在 `capabilities.desktop == false` 的机器上被禁用（Sandbox/无 Xvfb）。
 * 浏览器预览是截图流（丢旧帧），不是 VNC/嵌入式 WebView。
-* `host-agent serve` 与 GPUI 现在在同一 newline-JSON UDS 上覆盖 machine、runtime、task/session 状态、PTY、browser、computer 命令；任务创建、follow-up 消息排队、取消、permission approve/deny 恢复和 AgentLoop 事件流已接入 host-agent blocking worker。第二轮 UI 补齐了 permission/ReadyForCheck 操作、Browser 截图刷新/打开、Runtime PTY 打开/输入/关闭、diff 文件选择和 Bot/Workbench 选择；但本轮新增代码尚未在缺少 Rust toolchain 的环境编译，不能把它当成已完成的在线模型/SSH E2E。
+* `host-agent serve` 与 GPUI 现在在同一 newline-JSON UDS 上覆盖 machine、runtime、task/session 状态、PTY、browser、computer 命令；任务创建、follow-up 消息排队、取消、permission approve/deny 恢复、持久化 session/task 重载和 AgentLoop 事件流已接入 host-agent blocking worker。第二轮 UI 补齐了 permission/ReadyForCheck 操作、Browser 截图刷新/打开、Runtime PTY 打开/输入/关闭、diff 文件选择和 Bot/Workbench 选择；第三轮增加了 SQLite session/task replay 与重连后的可恢复 worker。以上新增代码尚未在缺少 Rust toolchain 的环境编译，不能把它当成已完成的在线模型/SSH E2E。

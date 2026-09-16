@@ -56,6 +56,11 @@ pub struct MachineForm {
     pub testing: bool,
     /// Visible when the form is open.
     pub open: bool,
+    /// Keyboard editing state for the focused field. This keeps insertion,
+    /// arrows, Home/End, Backspace and Delete predictable without storing any
+    /// credential or introducing a remote-specific input model.
+    pub active_field: Option<MachineFormField>,
+    pub cursor: usize,
 }
 
 /// A field in the add-machine form. The form uses GPUI's keyboard events so
@@ -67,6 +72,14 @@ pub enum MachineFormField {
     User,
     Port,
     SshConfigHost,
+}
+
+fn char_to_byte_index(value: &str, char_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
 }
 
 impl MachineForm {
@@ -220,10 +233,9 @@ impl MachineStore {
         cx.notify();
     }
 
-    /// Edit one form field from a focused GPUI field. This intentionally keeps
-    /// cursor management simple (the form is short and edits append at the end)
-    /// while still providing real keyboard input, deletion, and IME-produced
-    /// `key_char` values instead of rendering inert labels.
+    /// Edit one form field from a focused GPUI field. This provides real
+    /// keyboard input, cursor movement, deletion and IME-produced `key_char`
+    /// values instead of rendering inert labels.
     pub fn edit_form_field(
         &mut self,
         field: MachineFormField,
@@ -231,6 +243,19 @@ impl MachineStore {
         key_char: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        if self.form.active_field != Some(field) {
+            let length = match field {
+                MachineFormField::Name => self.form.name.chars().count(),
+                MachineFormField::Host => self.form.host.chars().count(),
+                MachineFormField::User => self.form.user.chars().count(),
+                MachineFormField::Port => self.form.port.chars().count(),
+                MachineFormField::SshConfigHost => self.form.ssh_config_host.chars().count(),
+            };
+            self.form.active_field = Some(field);
+            self.form.cursor = length;
+        }
+
+        let mut cursor = self.form.cursor;
         let value = match field {
             MachineFormField::Name => &mut self.form.name,
             MachineFormField::Host => &mut self.form.host,
@@ -238,17 +263,40 @@ impl MachineStore {
             MachineFormField::Port => &mut self.form.port,
             MachineFormField::SshConfigHost => &mut self.form.ssh_config_host,
         };
-        if key.eq_ignore_ascii_case("backspace") || key.eq_ignore_ascii_case("delete") {
-            value.pop();
-        } else if !matches!(key_char, Some(text) if text.is_empty()) {
-            if let Some(text) = key_char.filter(|text| !text.is_empty()) {
-                if !text.chars().any(|c| c.is_control()) {
-                    value.push_str(text);
+        let char_count = value.chars().count();
+        cursor = cursor.min(char_count);
+        match key.to_ascii_lowercase().as_str() {
+            "left" | "arrowleft" => cursor = cursor.saturating_sub(1),
+            "right" | "arrowright" => cursor = (cursor + 1).min(char_count),
+            "home" => cursor = 0,
+            "end" => cursor = char_count,
+            "backspace" => {
+                if cursor > 0 {
+                    let end = char_to_byte_index(value, cursor);
+                    let start = char_to_byte_index(value, cursor - 1);
+                    value.replace_range(start..end, "");
+                    cursor -= 1;
                 }
-            } else if key.chars().count() == 1 && !key.chars().next().unwrap_or_default().is_control() {
-                value.push_str(key);
+            }
+            "delete" => {
+                if cursor < char_count {
+                    let start = char_to_byte_index(value, cursor);
+                    let end = char_to_byte_index(value, cursor + 1);
+                    value.replace_range(start..end, "");
+                }
+            }
+            _ => {
+                let text = key_char
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| if key.chars().count() == 1 { key } else { "" });
+                if !text.chars().any(|c| c.is_control()) && !text.is_empty() {
+                    let at = char_to_byte_index(value, cursor);
+                    value.insert_str(at, text);
+                    cursor += text.chars().count();
+                }
             }
         }
+        self.form.cursor = cursor;
         cx.notify();
     }
 

@@ -322,6 +322,12 @@ impl MachineManager {
         MachineId::local()
     }
 
+    /// Persistence is owned by the machine manager so host-agent session/task
+    /// recovery uses the same database as machine coordinates.
+    pub fn persistence(&self) -> Option<Arc<SqlitePersistence>> {
+        self.persistence.clone()
+    }
+
     /// **The routing call.** Every tool goes through here.
     ///
     /// Returning `Option` rather than an error keeps the tool layer simple: a

@@ -72,6 +72,10 @@ impl TaskManager {
         self.tasks.get_mut(id)
     }
 
+    pub fn restore(&mut self, task: Task) {
+        self.tasks.insert(task.id.clone(), task);
+    }
+
     pub fn list(&self) -> Vec<&Task> {
         self.tasks.values().collect()
     }

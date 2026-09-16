@@ -51,6 +51,34 @@ extern "C" fn collect_row(
     0
 }
 
+#[derive(Debug, Clone)]
+pub struct PersistedSession {
+    pub id: String,
+    pub runtime_id: String,
+    pub machine_id: String,
+    pub model: String,
+    pub status: String,
+    pub goal: Option<String>,
+    pub cwd: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub messages: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedTask {
+    pub id: String,
+    pub goal: String,
+    pub session_id: String,
+    pub runtime_id: String,
+    pub machine_id: String,
+    pub status: String,
+    pub artifacts: String,
+    pub result: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 pub struct SqlitePersistence {
     db: Arc<Mutex<*mut sqlite3>>,
     path: PathBuf,
@@ -226,6 +254,58 @@ impl SqlitePersistence {
             return Err(message);
         }
         Ok(rows.rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Session / task recovery
+    // -----------------------------------------------------------------------
+
+    pub fn load_sessions(&self) -> Result<Vec<PersistedSession>, String> {
+        let rows = self.query(
+            "SELECT id, runtime_id, machine_id, model, status, goal, cwd, created_at, updated_at, messages FROM session ORDER BY created_at ASC;",
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 10 { return None; }
+                Some(PersistedSession {
+                    id: row[0].clone().unwrap_or_default(),
+                    runtime_id: row[1].clone().unwrap_or_default(),
+                    machine_id: row[2].clone().unwrap_or_else(|| "machine-local".to_string()),
+                    model: row[3].clone().unwrap_or_default(),
+                    status: row[4].clone().unwrap_or_else(|| "idle".to_string()),
+                    goal: row[5].clone(),
+                    cwd: row[6].clone().unwrap_or_else(|| "/workspace".to_string()),
+                    created_at: row[7].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    updated_at: row[8].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    messages: row[9].clone().unwrap_or_else(|| "[]".to_string()),
+                })
+            })
+            .collect())
+    }
+
+    pub fn load_tasks(&self) -> Result<Vec<PersistedTask>, String> {
+        let rows = self.query(
+            "SELECT id, goal, session_id, runtime_id, machine_id, status, artifacts, result, created_at, updated_at FROM task ORDER BY created_at ASC;",
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if row.len() < 10 { return None; }
+                Some(PersistedTask {
+                    id: row[0].clone().unwrap_or_default(),
+                    goal: row[1].clone().unwrap_or_default(),
+                    session_id: row[2].clone().unwrap_or_default(),
+                    runtime_id: row[3].clone().unwrap_or_default(),
+                    machine_id: row[4].clone().unwrap_or_else(|| "machine-local".to_string()),
+                    status: row[5].clone().unwrap_or_else(|| "pending".to_string()),
+                    artifacts: row[6].clone().unwrap_or_else(|| "[]".to_string()),
+                    result: row[7].clone(),
+                    created_at: row[8].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    updated_at: row[9].as_deref().and_then(|v| v.parse().ok()).unwrap_or(0),
+                })
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------
