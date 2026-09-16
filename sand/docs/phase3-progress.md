@@ -91,7 +91,7 @@ Chat/App -> Bot (long-lived) -> Session (Conversation, handoff) -> Runtime (cgro
 - Verified: SetDesiredState + GetObservedState works
 
 ### 11. Bot -> Session -> Runtime handoff
-- `session.rs`: `handoff()`, `handoff_with_messages(keep_last_n)`, `transfer_runtime(new_runtime_id)`
+- `session.rs`: `handoff()`, `handoff_with_messages(keep_last_n)`; handoff preserves the session's fixed runtime/machine ownership
 - `api/mod.rs`: Bot struct {id, sessions, workbench_id}, HostAgentApi now has workbench_mgr + bots, methods:
   - create_bot()
   - create_session()
@@ -131,7 +131,7 @@ Chat/App -> Bot (long-lived) -> Session (Conversation, handoff) -> Runtime (cgro
 Chat/App -> Bot (long-lived, sessions, workbench)
             │
             ▼
-      HostAgentApi -> Session (handoff, transfer_runtime) -> Runtime (cgroup, Xvfb, chrome-profile)
+      HostAgentApi -> Session (handoff within fixed runtime) -> Runtime (cgroup, Xvfb, chrome-profile)
             │
             ├─ Loop (freeze on ReadyForCheck/Permission, Attention)
             ├─ Tools (33, binary RPC, workspace direct)
