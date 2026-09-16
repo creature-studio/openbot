@@ -274,10 +274,9 @@ impl TaskStore {
                     content: goal.clone(),
                     at: chrono::Utc::now(),
                 }));
-                let task = runtime_id
-                    .clone()
-                    .map(|runtime_id| task.with_runtime(runtime_id))
-                    .unwrap_or(task);
+                if let Some(runtime_id) = runtime_id.clone() {
+                    task = task.with_runtime(runtime_id);
+                }
                 // The UI creates an optimistic local row before host-agent
                 // allocates the real session/runtime id. Reconcile that row
                 // instead of displaying a duplicate task when task_created
