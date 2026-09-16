@@ -565,7 +565,6 @@ fn field(
         .child(
             div()
                 .id(field_id)
-                .focusable()
                 .cursor_pointer()
                 .on_key_down(move |event, _, cx| {
                     let key = event.keystroke.key.clone();

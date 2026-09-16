@@ -46,36 +46,49 @@ impl BrowserPanel {
             .browser_url
             .as_deref()
             .unwrap_or("No browser session");
-        let mut refresh_button = div().text_xs().cursor_pointer().child("↻");
-        let mut open_button = div().text_xs().cursor_pointer().child("↗");
-        if let Some(runtime_id) = task.runtime_id.clone() {
+        let (refresh_button, open_button) = if let Some(runtime_id) = task.runtime_id.clone() {
             let refresh_tx = command_tx.clone();
             let open_tx = command_tx.clone();
             let refresh_runtime = runtime_id.clone();
             let open_runtime = runtime_id;
             let open_url = url.to_string();
-            refresh_button = refresh_button
-                .id("browser-refresh")
-                .on_click(move |_, _, _| {
-                    let _ = refresh_tx.send(spark_transport::TransportCommand::BrowserAction {
-                        runtime_id: refresh_runtime.clone(),
-                        action: spark_transport::BrowserAction::Screenshot {
-                            format: "jpeg".to_string(),
-                            quality: 80,
-                        },
-                    });
-                });
-            open_button = open_button
-                .id("browser-open")
-                .on_click(move |_, _, _| {
-                    let _ = open_tx.send(spark_transport::TransportCommand::BrowserAction {
-                        runtime_id: open_runtime.clone(),
-                        action: spark_transport::BrowserAction::Open {
-                            url: open_url.clone(),
-                        },
-                    });
-                });
-        }
+            (
+                div()
+                    .text_xs()
+                    .cursor_pointer()
+                    .child("↻")
+                    .id("browser-refresh")
+                    .on_click(move |_, _, _| {
+                        let _ = refresh_tx.send(spark_transport::TransportCommand::BrowserAction {
+                            runtime_id: refresh_runtime.clone(),
+                            action: spark_transport::BrowserAction::Screenshot {
+                                format: "jpeg".to_string(),
+                                quality: 80,
+                            },
+                        });
+                    })
+                    .into_any_element(),
+                div()
+                    .text_xs()
+                    .cursor_pointer()
+                    .child("↗")
+                    .id("browser-open")
+                    .on_click(move |_, _, _| {
+                        let _ = open_tx.send(spark_transport::TransportCommand::BrowserAction {
+                            runtime_id: open_runtime.clone(),
+                            action: spark_transport::BrowserAction::Open {
+                                url: open_url.clone(),
+                            },
+                        });
+                    })
+                    .into_any_element(),
+            )
+        } else {
+            (
+                div().text_xs().cursor_pointer().child("↻").into_any_element(),
+                div().text_xs().cursor_pointer().child("↗").into_any_element(),
+            )
+        };
 
         div()
             .flex()

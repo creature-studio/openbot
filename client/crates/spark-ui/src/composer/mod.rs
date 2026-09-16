@@ -182,7 +182,6 @@ impl Render for Composer {
                 gpui::rgb(0x2d3748)
             })
             .text_sm()
-            .focusable()
             .id("composer-input")
             .on_key_down(cx.listener(Self::on_key_down));
         input = input.child(if self.input_text.is_empty() {

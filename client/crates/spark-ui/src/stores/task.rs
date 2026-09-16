@@ -88,6 +88,12 @@ impl TaskEntity {
         }
     }
 
+    /// Pin the task to the runtime returned by host-agent.
+    pub fn with_runtime(mut self, runtime_id: String) -> Self {
+        self.runtime_id = Some(runtime_id);
+        self
+    }
+
     /// The machine running this task lost its bridge.
     ///
     /// The task is **not** failed: the runtime, its PTYs and its processes are
@@ -206,12 +212,6 @@ impl TaskStore {
         self.add_task(task, cx);
         let _ = command_tx.send(spark_transport::TransportCommand::CreateTask { machine_id, goal });
         task_id
-    }
-
-    /// Pin the task to the runtime returned by host-agent.
-    pub fn with_runtime(mut self, runtime_id: String) -> Self {
-        self.runtime_id = Some(runtime_id);
-        self
     }
 
     /// Machine of the selected task — what the Runtime inspector shows.

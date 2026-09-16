@@ -164,7 +164,6 @@ impl TerminalPanel {
                         .py_1()
                         .text_color(gpui::rgb(0xcccccc))
                         .bg(gpui::rgb(0x111111))
-                        .focusable()
                         .id("terminal-input")
                         .on_key_down(move |event, _, _| {
                             let key = event.keystroke.key.as_str();
