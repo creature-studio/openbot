@@ -13,7 +13,7 @@
 //! tab show that anything is remote.
 
 use gpui::{
-    div, prelude::*, App, Context, Entity, EventEmitter, IntoElement, Render, Window,
+    div, prelude::*, px, App, Context, Entity, EventEmitter, IntoElement, Render, Window,
 };
 use spark_model::*;
 use spark_transport::{Transport, TransportCommand, TransportEvent};

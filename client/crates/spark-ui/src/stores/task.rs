@@ -318,18 +318,12 @@ impl TaskStore {
                     match next_status {
                         TaskStatus::Completed => {
                             task.attention = Some(Attention::Completed {
-                                summary: task
-                                    .result
-                                    .clone()
-                                    .unwrap_or_else(|| "Task completed".to_string()),
+                                summary: "Task completed".to_string(),
                             });
                         }
                         TaskStatus::Failed => {
                             task.attention = Some(Attention::ExecutionError {
-                                error: task
-                                    .result
-                                    .clone()
-                                    .unwrap_or_else(|| "Task failed".to_string()),
+                                error: "Task failed".to_string(),
                                 recoverable: true,
                             });
                         }

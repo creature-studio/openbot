@@ -592,7 +592,7 @@ fn field(
                 cx.notify();
             });
             if let Some(handle) = click_focus.as_ref() {
-                window.focus(handle);
+                window.focus(handle, cx);
             }
         })
         .on_key_down(move |event, _, cx| {

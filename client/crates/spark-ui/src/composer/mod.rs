@@ -188,8 +188,8 @@ impl Render for Composer {
             .text_sm()
             .id("composer-input")
             .track_focus(&focus_handle)
-            .on_click(move |_, window, _| {
-                window.focus(&focus_for_click);
+            .on_click(move |_, window, cx| {
+                window.focus(&focus_for_click, cx);
             })
             .on_key_down(cx.listener(Self::on_key_down));
         input = input.child(if self.input_text.is_empty() {
