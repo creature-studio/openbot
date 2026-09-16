@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use spark_transport::{TransportCommand, TransportEvent};
 
 static PENDING_EVENTS: Mutex<VecDeque<TransportEvent>> = Mutex::new(VecDeque::new());
+static PENDING_COMMANDS: Mutex<VecDeque<TransportCommand>> = Mutex::new(VecDeque::new());
 static COMMAND_SENDER: Mutex<Option<Arc<dyn Fn(TransportCommand) + Send + Sync>>> =
     Mutex::new(None);
 
@@ -41,16 +42,25 @@ pub fn install_command_sender<F>(sender: F)
 where
     F: Fn(TransportCommand) + Send + Sync + 'static,
 {
-    *COMMAND_SENDER.lock() = Some(Arc::new(sender));
+    let sender: Arc<dyn Fn(TransportCommand) + Send + Sync> = Arc::new(sender);
+    *COMMAND_SENDER.lock() = Some(sender.clone());
+    // GPUI can be constructed before the socket task finishes connecting. Do
+    // not lose a click made during that window; flush queued commands only
+    // after the sender is installed and without holding the queue lock.
+    let pending: Vec<_> = PENDING_COMMANDS.lock().drain(..).collect();
+    for command in pending {
+        sender(command);
+    }
 }
 
-/// Send a command to host-agent. Silently dropped when the link is not
-/// installed yet (the UI can be built before the socket connects).
+/// Send a command to host-agent. Commands are retained until the link is
+/// installed, so early UI actions are not silently discarded.
 pub fn send(command: TransportCommand) {
-    let sender = COMMAND_SENDER.lock().clone();
-    match sender {
-        Some(sender) => sender(command),
-        None => tracing::debug!("host-agent link not installed yet; dropping command"),
+    if let Some(sender) = COMMAND_SENDER.lock().clone() {
+        sender(command);
+    } else {
+        PENDING_COMMANDS.lock().push_back(command);
+        tracing::debug!("host-agent link not installed yet; queued command");
     }
 }
 

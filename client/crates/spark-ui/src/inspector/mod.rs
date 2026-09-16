@@ -54,7 +54,6 @@ impl Inspector {
         }
     }
 
-    #[allow(dead_code)] // called by tab click handlers (not yet wired)
     fn set_tab(&mut self, tab: InspectorTab, cx: &mut Context<Self>) {
         self.active_tab = tab;
         cx.notify();
@@ -71,30 +70,40 @@ impl Render for Inspector {
             .bg(gpui::rgb(0x111827))
             .border_l_1()
             .border_color(gpui::rgb(0x2d3748))
-            .child(self.render_tabs())
+            .child(self.render_tabs(cx))
             .child(self.render_content(cx))
     }
 }
 
 impl Inspector {
-    fn render_tabs(&self) -> impl IntoElement {
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let inspector = cx.entity();
         div()
             .flex()
             .border_b_1()
             .border_color(gpui::rgb(0x2d3748))
-            .child(self.tab_button("Browser", InspectorTab::Browser))
-            .child(self.tab_button("Files", InspectorTab::Files))
-            .child(self.tab_button("Terminal", InspectorTab::Terminal))
-            .child(self.tab_button("Runtime", InspectorTab::Runtime))
+            .child(self.tab_button("Browser", InspectorTab::Browser, inspector.clone()))
+            .child(self.tab_button("Files", InspectorTab::Files, inspector.clone()))
+            .child(self.tab_button("Terminal", InspectorTab::Terminal, inspector.clone()))
+            .child(self.tab_button("Runtime", InspectorTab::Runtime, inspector))
     }
 
-    fn tab_button(&self, label: &str, tab: InspectorTab) -> impl IntoElement {
+    fn tab_button(
+        &self,
+        label: &str,
+        tab: InspectorTab,
+        inspector: Entity<Self>,
+    ) -> impl IntoElement {
         let is_active = self.active_tab == tab;
         div()
             .px_3()
             .py_2()
             .text_sm()
             .cursor_pointer()
+            .id(format!("inspector-tab-{}", label.to_lowercase()))
+            .on_click(move |_, _, cx| {
+                inspector.update(cx, |inspector, cx| inspector.set_tab(tab, cx));
+            })
             .when(is_active, |d| {
                 d.border_b_2()
                     .border_color(gpui::rgb(0x3b82f6))

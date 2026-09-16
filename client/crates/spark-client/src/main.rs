@@ -158,6 +158,9 @@ async fn run_host_agent_link(socket: PathBuf) -> Result<()> {
     spark_ui::install_command_sender(move |command| {
         let _ = command_sink.send(command);
     });
+    // The socket is established before GPUI starts, so publish the connection
+    // transition into the same queue used by all later host-agent events.
+    spark_ui::push_event(TransportEvent::Connected);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // Commands → JSON lines.
@@ -180,9 +183,14 @@ async fn run_host_agent_link(socket: PathBuf) -> Result<()> {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if event_tx.send(line).is_err() {
-                break;
+                return;
             }
         }
+        // Surface EOF separately; otherwise the UI remains permanently shown
+        // as connected after host-agent exits or the socket is severed.
+        let _ = event_tx.send(
+            r#"{"event":"disconnected","reason":"host-agent link closed"}"#.to_string(),
+        );
     });
 
     // Fan out: refresh_machines needs a follow-up command, everything else is a
@@ -215,6 +223,10 @@ fn event_to_transport_event(line: &str) -> EventAction {
     };
     let event = value.get("event").and_then(|v| v.as_str()).unwrap_or_default();
     match event {
+        "connected" => EventAction::Emit(TransportEvent::Connected),
+        "disconnected" => EventAction::Emit(TransportEvent::Disconnected {
+            reason: value.get("reason").and_then(|v| v.as_str()).map(str::to_string),
+        }),
         "machines" => match serde_json::from_value::<Vec<Machine>>(value["machines"].clone()) {
             Ok(machines) => EventAction::Emit(TransportEvent::MachinesUpdated { machines }),
             Err(_) => EventAction::Ignore,
@@ -286,6 +298,20 @@ fn event_to_transport_event(line: &str) -> EventAction {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             },
+        }),
+        "bootstrap_progress" => EventAction::Emit(TransportEvent::MachineBootstrapProgress {
+            machine_id: MachineId::from_string(
+                value
+                    .get("machine_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            message: value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
         }),
         "bootstrap_finished" => EventAction::Emit(TransportEvent::MachineBootstrapFinished {
             machine_id: MachineId::from_string(

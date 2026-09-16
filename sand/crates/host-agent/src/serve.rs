@@ -221,7 +221,6 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
         .to_string();
 
     match cmd.as_str() {
-        "connect" | "disconnect" => Some(ok_json(&cmd)),
         "connect" => Some(machines_json(manager)),
         // The GPUI-to-host-agent UDS is owned by spark-client; disconnecting
         // that logical link must not tear down SSH machines or remote runtimes.

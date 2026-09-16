@@ -129,13 +129,22 @@ impl Sidebar {
                     _ => "○",
                 };
                 let selected = tasks.selected.as_ref() == Some(id);
+                let task_id = id.clone();
+                let task_store = self.tasks.clone();
                 list = list.child(
                     div()
                         .px_2()
                         .py_1()
                         .rounded_md()
                         .text_sm()
+                        .cursor_pointer()
+                        .id(format!("task-row-{}", task_id.0))
                         .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                        .on_click(move |_, _, cx| {
+                            task_store.update(cx, |tasks, cx| {
+                                tasks.select(Some(task_id.clone()), cx);
+                            });
+                        })
                         .child(SharedString::from(format!(
                             "{} {}",
                             marker, task.goal

@@ -312,6 +312,22 @@ impl RootView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
 
+        // The socket reader is outside GPUI and queues events in `link`. A
+        // small redraw tick is required while the window is otherwise idle;
+        // without it, queued machine/task events would not be drained until a
+        // user interaction happened to trigger another render.
+        cx.spawn(async move |this, cx| {
+            loop {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+        })
+        .detach();
+
         // Copy the entity handles out of the read guard first: `cx.new` needs a
         // mutable borrow of the context, which a live guard would block.
         let (bots, tasks, workbenches, machines, attention, connection, command_tx) = {
