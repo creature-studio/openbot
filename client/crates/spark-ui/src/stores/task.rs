@@ -9,8 +9,6 @@ use gpui::{Context, EventEmitter};
 use spark_model::*;
 use std::collections::HashMap;
 
-use super::attention::AttentionSnapshot;
-
 // ---------------------------------------------------------------------------
 // TaskEntity: the rich per-task state
 // ---------------------------------------------------------------------------
@@ -332,6 +330,7 @@ impl TaskStore {
             TransportEvent::ToolFinished {
                 task_id,
                 call_id,
+                tool_name: _,
                 status,
                 result,
                 duration_ms,

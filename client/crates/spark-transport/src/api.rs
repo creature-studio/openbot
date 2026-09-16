@@ -3,7 +3,7 @@
 //! For real-time streaming, use the Transport struct which handles
 //! WebSocket/SSE connections and emits TransportEvent.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use spark_model::*;
 use spark_model::task::FileChange;
 

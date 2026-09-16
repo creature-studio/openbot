@@ -38,7 +38,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::runtime_transport::BoxStream;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{oneshot, Mutex as AsyncMutex, Notify};
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
 use sand_protocol::frame::{FrameHeader, FrameKind, FramePayload, MAX_PAYLOAD_LEN};
 use sand_protocol::SAND_PROTOCOL_VERSION;
@@ -371,6 +371,7 @@ pub struct SshTransport {
     /// Push-frame sink for events.
     events: EventSink,
     /// True while the machine is in the middle of a reconnect attempt.
+    #[allow(dead_code)] // polled by reconnect supervision (not yet wired)
     reconnecting: AtomicBool,
 }
 

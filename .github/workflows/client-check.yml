@@ -1,0 +1,102 @@
+name: client-check
+
+on:
+  push:
+    paths:
+      - 'client/**'
+      - '.github/workflows/client-check.yml'
+  pull_request:
+    paths:
+      - 'client/**'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libasound2-dev \
+            libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: cargo check
+        working-directory: client
+        run: cargo check --workspace > /tmp/check.log 2>&1
+
+      # The sandbox running this agent cannot download Actions logs, so mirror
+      # the failure output into check annotations (readable via the API).
+      # Each step is capped at ~10 annotations; the annotations API paginates
+      # at 30 entries (newest first), so fetch with ?per_page=100.
+      - name: Report errors 1-4
+        if: failure()
+        run: |
+          n=$(wc -l < /tmp/check.log)
+          echo "::error::cargo check failed, check.log has $n lines. Errors:"
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^error(\[|:)" | head -8 | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[eA] $safe"
+          done
+
+      - name: Report errors 5-8
+        if: failure()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^error(\[|:)" | sed -n '9,16p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[eB] $safe"
+          done
+
+      # Always runs (even on success) so warnings stay visible once errors hit zero.
+      - name: Report warnings
+        if: always()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^warning(:| )" | head -8 | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::warning::[w] $safe"
+          done
+
+      - name: Report warnings 5-8
+        if: always()
+        run: |
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/check.log | grep -A1 --no-group-separator -E "^warning(:| )" | sed -n '9,16p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::warning::[w2] $safe"
+          done
+
+      - name: Report tail part 1/3
+        if: failure()
+        run: |
+          tail -27 /tmp/check.log | sed -n '1,9p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[t1] $safe"
+          done
+
+      - name: Report tail part 2/3
+        if: failure()
+        run: |
+          tail -27 /tmp/check.log | sed -n '10,18p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[t2] $safe"
+          done
+
+      - name: Report tail part 3/3
+        if: failure()
+        run: |
+          tail -27 /tmp/check.log | sed -n '19,27p' | while IFS= read -r line; do
+            safe=$(printf '%s' "$line" | sed 's/\x1b\[[0-9;]*m//g' | head -c 1200 | sed 's/%/%25/g; s/\r/%0D/g')
+            echo "::error::[t3] $safe"
+          done

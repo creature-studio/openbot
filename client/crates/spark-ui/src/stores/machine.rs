@@ -86,7 +86,7 @@ impl MachineForm {
         } else {
             return None;
         };
-        let mut draft = spark_transport::MachineDraft::new(name, self.host.trim());
+        let mut draft = spark_transport::MachineDraft::new(name, host);
         if !alias.is_empty() {
             draft = draft.with_alias(alias);
         }

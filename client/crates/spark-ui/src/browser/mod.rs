@@ -62,7 +62,7 @@ impl BrowserPanel {
                             .text_xs()
                             .text_color(gpui::rgb(0x9ca3af))
                             .font_family("monospace")
-                            .child(url),
+                            .child(url.to_string()),
                     )
                     .child(
                         div()

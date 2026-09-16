@@ -32,7 +32,7 @@
 //! ```
 
 use gpui::{
-    div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
+    div, px, prelude::*, Context, Entity, IntoElement, Render, Window,
 };
 use crate::machine::MachinePanel;
 use crate::stores::{AttentionStore, AttentionSnapshot, MachineStore};
@@ -46,7 +46,7 @@ pub struct AttentionOverlay {
 }
 
 impl AttentionOverlay {
-    pub fn new(attention: Entity<AttentionStore>, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(attention: Entity<AttentionStore>, cx: &mut Context<Self>) -> Self {
         cx.observe(&attention, |_, _, cx| cx.notify()).detach();
         Self {
             attention,
@@ -58,7 +58,7 @@ impl AttentionOverlay {
     pub fn with_machines(
         attention: Entity<AttentionStore>,
         machines: Entity<MachineStore>,
-        cx: &mut ViewContext<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&machines, |_, _, cx| cx.notify()).detach();
         let mut overlay = Self::new(attention, cx);
@@ -68,7 +68,7 @@ impl AttentionOverlay {
 }
 
 impl Render for AttentionOverlay {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Machine attention first: [取消] / [信任并连接] is a prerequisite for
         // every task on that machine.
         let machine_attention = self
@@ -260,7 +260,7 @@ impl Render for AttentionOverlay {
                         ),
                 ),
 
-            AttentionSnapshot::Completed { summary } => div()
+            AttentionSnapshot::Completed { summary, .. } => div()
                 .absolute()
                 .inset_0()
                 .flex()
@@ -318,7 +318,7 @@ impl Render for AttentionOverlay {
                         ),
                 ),
 
-            AttentionSnapshot::WaitingInput { prompt } => div()
+            AttentionSnapshot::WaitingInput { prompt, .. } => div()
                 .absolute()
                 .inset_0()
                 .flex()

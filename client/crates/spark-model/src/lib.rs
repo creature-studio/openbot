@@ -13,7 +13,7 @@ pub mod settings;
 pub mod machine;
 
 pub use bot::{BotId, Bot};
-pub use task::{TaskId, TaskStatus, TaskSummary, TaskDetail, Artifact};
+pub use task::{TaskId, TaskStatus, TaskSummary, TaskDetail, Artifact, FileChange, FileChangeKind};
 pub use workbench::Workbench;
 pub use timeline::{
     TimelineItem, UserMessage, AssistantMessage, StatusItem, ToolItem,

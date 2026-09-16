@@ -16,6 +16,6 @@ pub use connection::ConnectionStore;
 pub use bot::BotStore;
 pub use task::TaskStore;
 pub use workbench::WorkbenchStore;
-pub use attention::AttentionStore;
+pub use attention::{AttentionStore, AttentionSnapshot};
 pub use settings::SettingsStore;
 pub use machine::MachineStore;

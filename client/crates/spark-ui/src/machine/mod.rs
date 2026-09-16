@@ -26,7 +26,7 @@
 //! These are `render_static` helpers (same convention as `BrowserPanel`): the
 //! sidebar and the inspector own the entities, the drawing lives here.
 
-use gpui::{div, prelude::*, IntoElement, SharedString};
+use gpui::{div, px, prelude::*, IntoElement, SharedString};
 use spark_model::{Machine, MachineId, MachineKind, MachineStatus};
 
 use crate::stores::machine::{
@@ -175,7 +175,7 @@ impl MachinePanel {
                 format!(
                     "{}  latency {}",
                     metadata.sandd_version.clone().unwrap_or_else(|| "—".into()),
-                    latency_label(machine)
+                    latency_label(&machine)
                 ),
             ),
             (

@@ -51,6 +51,8 @@ pub use stores::{
 };
 pub use stores::machine::{MachineAttention, MachineForm};
 
+use gpui::AppContext as _;
+
 /// Start the GPUI application.
 ///
 /// The window owns [`AppState`]; every frame drains the host-agent link queue
@@ -58,7 +60,7 @@ pub use stores::machine::{MachineAttention, MachineForm};
 /// sidebar's machine status, the Runtime tab and the host-key card all update
 /// from the same stream the task timeline uses.
 pub fn run_app() {
-    gpui::Application::new().run(|cx: &mut gpui::AppContext| {
+    gpui_platform::application().run(|cx: &mut gpui::App| {
         let state = AppState::new("host-agent", cx);
 
         // Commands the UI produced travel over the host-agent link. A plain OS
@@ -73,7 +75,7 @@ pub fn run_app() {
 
         let state_for_window = state.clone();
         let options = gpui::WindowOptions::default();
-        if let Err(e) = cx.open_window(options, move |cx| {
+        if let Err(e) = cx.open_window(options, move |_window, cx| {
             cx.new(|cx| RootView::new(state_for_window.clone(), cx))
         }) {
             tracing::error!("could not open the Spark window: {e:#}");

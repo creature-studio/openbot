@@ -18,7 +18,7 @@
 //!   host / OS / CPU / memory / GPU / sandd version / latency
 
 use gpui::{
-    div, prelude::*, Context, Entity, IntoElement, Render, ViewContext,
+    div, px, prelude::*, App, Context, Entity, IntoElement, Render, SharedString, Window,
 };
 use crate::machine::MachinePanel;
 use crate::stores::{MachineStore, TaskStore};
@@ -41,7 +41,7 @@ pub struct Inspector {
 }
 
 impl Inspector {
-    pub fn new(tasks: Entity<TaskStore>, machines: Entity<MachineStore>, cx: &mut ViewContext<Self>) -> Self {
+    pub fn new(tasks: Entity<TaskStore>, machines: Entity<MachineStore>, cx: &mut Context<Self>) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
         cx.observe(&machines, |_, _, cx| cx.notify()).detach();
 
@@ -54,45 +54,41 @@ impl Inspector {
         }
     }
 
-    fn set_tab(&mut self, tab: InspectorTab, cx: &mut ViewContext<Self>) {
+    #[allow(dead_code)] // called by tab click handlers (not yet wired)
+    fn set_tab(&mut self, tab: InspectorTab, cx: &mut Context<Self>) {
         self.active_tab = tab;
         cx.notify();
     }
 }
 
 impl Render for Inspector {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .h_full()
             .w(px(360.0))
-            .bg(cx.theme().colors().panel_background)
+            .bg(gpui::rgb(0x111827))
             .border_l_1()
-            .border_color(cx.theme().colors().border)
-            .child(self.render_tabs(cx))
+            .border_color(gpui::rgb(0x2d3748))
+            .child(self.render_tabs())
             .child(self.render_content(cx))
     }
 }
 
 impl Inspector {
-    fn render_tabs(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_tabs(&self) -> impl IntoElement {
         div()
             .flex()
             .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .child(self.tab_button("Browser", InspectorTab::Browser, cx))
-            .child(self.tab_button("Files", InspectorTab::Files, cx))
-            .child(self.tab_button("Terminal", InspectorTab::Terminal, cx))
-            .child(self.tab_button("Runtime", InspectorTab::Runtime, cx))
+            .border_color(gpui::rgb(0x2d3748))
+            .child(self.tab_button("Browser", InspectorTab::Browser))
+            .child(self.tab_button("Files", InspectorTab::Files))
+            .child(self.tab_button("Terminal", InspectorTab::Terminal))
+            .child(self.tab_button("Runtime", InspectorTab::Runtime))
     }
 
-    fn tab_button(
-        &self,
-        label: &str,
-        tab: InspectorTab,
-        cx: &ViewContext<Self>,
-    ) -> impl IntoElement {
+    fn tab_button(&self, label: &str, tab: InspectorTab) -> impl IntoElement {
         let is_active = self.active_tab == tab;
         div()
             .px_3()
@@ -106,10 +102,10 @@ impl Inspector {
             })
             .when(!is_active, |d| d.text_color(gpui::rgb(0x9ca3af)))
             .hover(|d| d.text_color(gpui::rgb(0xffffff)))
-            .child(label)
+            .child(SharedString::from(label))
     }
 
-    fn render_content(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render_content(&self, cx: &App) -> impl IntoElement {
         let tasks = self.tasks.read(cx);
         let task = tasks.selected_task();
 
