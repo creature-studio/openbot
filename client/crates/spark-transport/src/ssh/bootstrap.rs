@@ -145,7 +145,7 @@ pub fn parse_version_line(text: &str) -> Option<String> {
 
 /// Does this machine already have a working, compatible sandd?
 pub async fn remote_sandd_version(transport: &SshTransport, binary: &str) -> Option<String> {
-    let quoted = shell_quote(binary);
+    let quoted = shell_path(binary);
     let (code, stdout, _) = transport
         .ssh_exec(&format!("{quoted} --version 2>/dev/null"))
         .await
@@ -181,15 +181,15 @@ pub fn layout_commands(paths: &SparkPaths, version: &str) -> Vec<String> {
 
 /// Start sandd detached and wait for its socket to appear.
 pub fn start_command(paths: &SparkPaths) -> String {
-    let binary = format!("{}/current/sandd", paths.root);
-    let log = format!("{}/sandd.log", paths.log);
+    let binary = shell_path(&format!("{}/current/sandd", paths.root));
+    let log = shell_path(&format!("{}/sandd.log", paths.log));
     format!(
         "nohup {binary} --socket-dir {sock_dir} --data-dir {data} >>{log} 2>&1 & \
          for i in $(seq 1 50); do [ -S {sock} ] && exit 0; sleep 0.2; done; \
          echo 'sandd did not start' >&2; tail -n 20 {log} >&2; exit 1",
-        sock_dir = paths.socket_dir(),
-        sock = paths.socket,
-        data = paths.data,
+        sock_dir = shell_path(&paths.socket_dir()),
+        sock = shell_path(&paths.socket),
+        data = shell_path(&paths.data),
         log = log,
     )
 }
@@ -272,7 +272,7 @@ pub async fn bootstrap(transport: &SshTransport) -> Result<BootstrapReport> {
     let (code, stdout, stderr) = transport
         .ssh_exec(&format!(
             "chmod 755 {binary} && {binary} --version",
-            binary = shell_quote(&remote_binary)
+            binary = shell_path(&remote_binary)
         ))
         .await?;
     if code != 0 {
@@ -290,7 +290,7 @@ pub async fn bootstrap(transport: &SshTransport) -> Result<BootstrapReport> {
 
     // 5. update the symlink and 6. start it
     let (code, _, stderr) = transport
-        .ssh_exec(&format!("ln -sfn {remote_binary} {root}/current", root = paths.root))
+        .ssh_exec(&format!("ln -sfn {remote_binary} {root}/current", remote_binary = shell_path(&remote_binary), root = shell_path(&paths.root)))
         .await?;
     if code != 0 {
         bail!("cannot update the `current` symlink: {}", stderr.trim());
@@ -314,7 +314,7 @@ async fn ensure_running(transport: &SshTransport, paths: &SparkPaths) -> Result<
     // A live socket is the definition of "running": `[ -S path ]` plus a real
     // handshake happens right after this, on the bridge itself.
     let (code, _, _) = transport
-        .ssh_exec(&format!("[ -S {} ]", paths.socket))
+        .ssh_exec(&format!("[ -S {} ]", shell_path(&paths.socket)))
         .await?;
     if code == 0 {
         return Ok(());
@@ -379,6 +379,19 @@ pub fn host_target() -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Quote a remote path while preserving the documented `~/...` layout. A
+/// single-quoted tilde is literal on POSIX shells, so use the remote user's
+/// HOME variable for all bootstrap probes and symlink operations.
+fn shell_path(value: &str) -> String {
+    if let Some(suffix) = value.strip_prefix("~/") {
+        format!("\"$HOME/{suffix}\"")
+    } else if value == "~" {
+        "\"$HOME\"".to_string()
+    } else {
+        shell_quote(value)
+    }
 }
 
 /// The bootstrap script a user can run by hand to check what Spark will do.

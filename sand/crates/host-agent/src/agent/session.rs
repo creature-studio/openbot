@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use spark_model::MachineId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -37,7 +38,7 @@ pub struct AgentSession {
     pub goal: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -46,7 +47,7 @@ pub struct Message {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Role {
     System,
     User,
@@ -74,7 +75,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,

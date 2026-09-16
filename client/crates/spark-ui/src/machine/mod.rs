@@ -26,11 +26,12 @@
 //! These are `render_static` helpers (same convention as `BrowserPanel`): the
 //! sidebar and the inspector own the entities, the drawing lives here.
 
-use gpui::{div, px, prelude::*, IntoElement, SharedString};
+use gpui::{div, px, prelude::*, Entity, IntoElement, SharedString};
 use spark_model::{Machine, MachineId, MachineKind, MachineStatus};
 
 use crate::stores::machine::{
-    latency_label, status_icon, status_label, MachineAttention, MachineForm,
+    latency_label, status_icon, status_label, MachineAttention, MachineForm, MachineFormField,
+    MachineStore,
 };
 
 pub struct MachinePanel;
@@ -46,14 +47,16 @@ impl MachinePanel {
     pub fn render_sidebar_list(
         machines: Vec<Machine>,
         selected: Option<MachineId>,
+        store: Entity<MachineStore>,
     ) -> impl IntoElement {
         let mut list = div().flex().flex_col().gap_1();
 
         for machine in machines {
             let is_selected = selected.as_ref() == Some(&machine.id);
-            list = list.child(Self::render_sidebar_row(machine, is_selected));
+            list = list.child(Self::render_sidebar_row(machine, is_selected, store.clone()));
         }
 
+        let add_store = store.clone();
         list.child(
             div()
                 .mt_1()
@@ -63,12 +66,17 @@ impl MachinePanel {
                 .text_color(gpui::rgb(0x9ca3af))
                 .cursor_pointer()
                 .hover(|d| d.text_color(gpui::rgb(0xffffff)))
+                .id("add-machine")
+                .on_click(move |_, _, cx| {
+                    add_store.update(cx, |store, cx| store.open_form(cx));
+                })
                 .child("+ Machine"),
         )
     }
 
-    fn render_sidebar_row(machine: Machine, is_selected: bool) -> impl IntoElement {
+    fn render_sidebar_row(machine: Machine, is_selected: bool, store: Entity<MachineStore>) -> impl IntoElement {
         let status = machine.status.clone();
+        let machine_id = machine.id.clone();
         div()
             .flex()
             .items_center()
@@ -77,6 +85,11 @@ impl MachinePanel {
             .py_1()
             .rounded_md()
             .when(is_selected, |d| d.bg(gpui::rgb(0x1f2937)))
+            .id(format!("machine-row-{}", machine_id.as_str()))
+            .on_click(move |_, _, cx| {
+                let id = machine_id.clone();
+                store.update(cx, |store, cx| store.select(Some(id), cx));
+            })
             .child(
                 div()
                     .w(px(14.0))
@@ -274,7 +287,11 @@ impl MachinePanel {
     // "+ Machine" form
     // -----------------------------------------------------------------------
 
-    pub fn render_add_form(form: MachineForm) -> impl IntoElement {
+    pub fn render_add_form(
+        form: MachineForm,
+        store: Entity<MachineStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+    ) -> impl IntoElement {
         let mut body = div()
             .w(px(420.0))
             .rounded_lg()
@@ -293,15 +310,40 @@ impl MachinePanel {
                     .child("+ Machine"),
             );
 
-        body = body.child(field("name", &form.name, "devbox"));
-        body = body.child(field("host / ip", &form.host, "10.0.0.42"));
+        body = body.child(field(
+            "name",
+            &form.name,
+            "devbox",
+            store.clone(),
+            MachineFormField::Name,
+        ));
+        body = body.child(field(
+            "host / ip",
+            &form.host,
+            "10.0.0.42",
+            store.clone(),
+            MachineFormField::Host,
+        ));
         body = body.child(
             div()
                 .flex()
                 .gap_2()
-                .child(div().flex_1().child(field("user", &form.user, "ubuntu")))
-                .child(div().w(px(90.0)).child(field("port", &form.port, "22"))),
+                .child(div().flex_1().child(field(
+                    "user",
+                    &form.user,
+                    "ubuntu",
+                    store.clone(),
+                    MachineFormField::User,
+                )))
+                .child(div().w(px(90.0)).child(field(
+                    "port",
+                    &form.port,
+                    "22",
+                    store.clone(),
+                    MachineFormField::Port,
+                ))),
         );
+        let toggle_store = store.clone();
         body = body.child(
             div()
                 .flex()
@@ -309,11 +351,22 @@ impl MachinePanel {
                 .gap_2()
                 .text_xs()
                 .text_color(gpui::rgb(0x9ca3af))
+                .cursor_pointer()
+                .id("machine-form-ssh-config")
+                .on_click(move |_, _, cx| {
+                    toggle_store.update(cx, |store, cx| store.toggle_ssh_config(cx));
+                })
                 .child(if form.use_ssh_config { "☑" } else { "☐" })
                 .child("使用 ~/.ssh/config 别名（ProxyJump / IdentityFile 由 OpenSSH 处理）"),
         );
         if form.use_ssh_config {
-            body = body.child(field("ssh alias", &form.ssh_config_host, "devbox"));
+            body = body.child(field(
+                "ssh alias",
+                &form.ssh_config_host,
+                "devbox",
+                store.clone(),
+                MachineFormField::SshConfigHost,
+            ));
         }
 
         body = body.child(
@@ -352,15 +405,26 @@ impl MachinePanel {
             );
         }
 
+        let cancel_store = store.clone();
+        let test_store = store.clone();
+        let add_store = store.clone();
+        let test_tx = command_tx.clone();
+        let add_tx = command_tx.clone();
         body = body.child(
             div()
                 .flex()
                 .justify_end()
                 .gap_3()
                 .mt_3()
-                .child(button("取消", 0x374151))
-                .child(button("Test connection", 0x2563eb))
-                .child(button("Add machine", 0x059669)),
+                .child(button("取消", 0x374151).id("machine-form-cancel").on_click(move |_, _, cx| {
+                    cancel_store.update(cx, |store, cx| store.close_form(cx));
+                }))
+                .child(button("Test connection", 0x2563eb).id("machine-form-test").on_click(move |_, _, cx| {
+                    test_store.update(cx, |store, cx| store.test_connection(&test_tx, cx));
+                }))
+                .child(button("Add machine", 0x059669).id("machine-form-add").on_click(move |_, _, cx| {
+                    add_store.update(cx, |store, cx| store.add_machine(&add_tx, cx));
+                })),
         );
 
         body
@@ -373,7 +437,11 @@ impl MachinePanel {
     /// Unknown host key → fingerprint + [取消] / [信任并连接].
     /// Changed host key → same fingerprint, but the wording makes clear this is
     /// a *different* key than known_hosts recorded.
-    pub fn render_host_key_attention(attention: MachineAttention) -> impl IntoElement {
+    pub fn render_host_key_attention(
+        attention: MachineAttention,
+        store: Entity<MachineStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+    ) -> impl IntoElement {
         let (border, title) = if attention.changed {
             (gpui::rgb(0xef4444), "⚠ 主机密钥已变更")
         } else {
@@ -433,12 +501,17 @@ impl MachinePanel {
             );
         }
 
+        let cancel_store = store.clone();
+        let trust_store = store.clone();
+        let trust_tx = command_tx.clone();
         body.child(
             div()
                 .flex()
                 .justify_end()
                 .gap_3()
-                .child(button("取消", 0x374151))
+                .child(button("取消", 0x374151).id("host-key-cancel").on_click(move |_, _, cx| {
+                    cancel_store.update(cx, |store, cx| store.cancel_attention(cx));
+                }))
                 .child(button(
                     if attention.changed {
                         "我确认，替换 known_hosts 条目"
@@ -446,7 +519,9 @@ impl MachinePanel {
                         "信任并连接"
                     },
                     0x059669,
-                )),
+                ).id("host-key-trust").on_click(move |_, _, cx| {
+                    trust_store.update(cx, |store, cx| store.trust_and_connect(&trust_tx, cx));
+                })),
         )
     }
 }
@@ -468,7 +543,15 @@ fn status_color(status: &MachineStatus) -> u32 {
     }
 }
 
-fn field(label: &str, value: &str, placeholder: &str) -> impl IntoElement {
+fn field(
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    store: Entity<MachineStore>,
+    field: MachineFormField,
+) -> impl IntoElement {
+    let field_store = store;
+    let field_id = format!("machine-form-field-{}", label.replace(' ', "-"));
     div()
         .flex()
         .flex_col()
@@ -481,6 +564,16 @@ fn field(label: &str, value: &str, placeholder: &str) -> impl IntoElement {
         )
         .child(
             div()
+                .id(field_id)
+                .focusable()
+                .cursor_pointer()
+                .on_key_down(move |event, _, cx| {
+                    let key = event.keystroke.key.clone();
+                    let key_char = event.keystroke.key_char.as_deref().map(str::to_string);
+                    field_store.update(cx, |store, cx| {
+                        store.edit_form_field(field, &key, key_char.as_deref(), cx);
+                    });
+                })
                 .px_2()
                 .py_1()
                 .rounded_md()
@@ -495,7 +588,7 @@ fn field(label: &str, value: &str, placeholder: &str) -> impl IntoElement {
         )
 }
 
-fn button(label: &str, background: u32) -> impl IntoElement {
+fn button(label: &str, background: u32) -> gpui::Div {
     div()
         .px_4()
         .py_2()

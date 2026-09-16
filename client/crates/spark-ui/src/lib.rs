@@ -43,7 +43,7 @@ pub mod link;
 pub mod app;
 
 pub use app::{AppState, RootView};
-pub use link::{push_event, send as send_command, take_events};
+pub use link::{install_command_sender, push_event, send as send_command, take_events};
 pub use machine::MachinePanel;
 pub use stores::{
     ConnectionStore, BotStore, TaskStore, WorkbenchStore, AttentionStore, SettingsStore,

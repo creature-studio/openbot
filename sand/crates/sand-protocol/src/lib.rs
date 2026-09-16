@@ -13,6 +13,9 @@ pub const SANDB_VERSION: &str = "0.1.0";
 pub const SAND_PROTOCOL_VERSION: u32 = 2;
 
 /// Feature flags advertised in the bridge handshake.
+/// Features that are guaranteed by the daemon core. Optional browser/desktop
+/// features are added by sandd capability detection; advertising them here
+/// would make a headless machine look capable when it is not.
 pub const SAND_FEATURES: &[&str] = &[
     "exec",
     "pty",
@@ -20,7 +23,6 @@ pub const SAND_FEATURES: &[&str] = &[
     "fs.patch",
     "fs.glob",
     "screenshot",
-    "computer",
     "events",
     "handshake",
     "runtime.machine_id",

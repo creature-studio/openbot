@@ -57,8 +57,8 @@ impl ToolExecutionContext {
         list_machines: Arc<dyn Fn() -> Vec<Machine> + Send + Sync>,
         default_machine_id: MachineId,
     ) -> Self {
-        // Legacy constructor: without a runtime→machine resolver every tool
-        // call lands on the default machine, which is what the old code did.
+        // Callers using this constructor explicitly opt into the legacy local
+        // context. Machine-aware callers must use with_runtime_machine().
         Self {
             get_transport,
             get_machine,
@@ -85,19 +85,18 @@ impl ToolExecutionContext {
         }
     }
 
-    /// Machine a runtime lives on, falling back to the default machine (a
-    /// runtime created before the machine registry existed is local).
-    pub fn machine_for_runtime(&self, runtime_id: &str) -> MachineId {
-        (self.runtime_machine)(runtime_id).unwrap_or_else(|| self.default_machine_id.clone())
+    /// Machine a runtime lives on. Unknown ownership is an error condition, not
+    /// permission to run on the default/local machine.
+    pub fn machine_for_runtime(&self, runtime_id: &str) -> Option<MachineId> {
+        (self.runtime_machine)(runtime_id)
     }
 
     /// **The tool-facing call.** Tools hand in the runtime they were given and
     /// get back the transport of whatever machine that runtime lives on —
     /// local or SSH, they cannot tell the difference.
     pub fn transport_for_runtime(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
-        let machine_id = self.machine_for_runtime(runtime_id);
+        let machine_id = self.machine_for_runtime(runtime_id)?;
         self.transport_for(&machine_id)
-            .or_else(|| self.transport_for(&self.default_machine_id))
     }
 
     pub fn transport_for(&self, machine_id: &MachineId) -> Option<Arc<dyn RuntimeTransport>> {

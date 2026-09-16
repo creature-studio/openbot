@@ -23,6 +23,10 @@ pub struct TaskEntity {
     /// Machine this task's runtime lives on. Chosen when the task is created and
     /// never changed afterwards (architecture §二十: no handoff in v1).
     pub machine_id: MachineId,
+    /// Runtime is created with the task and remains pinned to this id.
+    /// Keeping it here lets runtime-addressed browser/computer frames route
+    /// back to the owning task without introducing a remote task model.
+    pub runtime_id: Option<String>,
     pub status: TaskStatus,
 
     pub timeline: Vec<TimelineItem>,
@@ -60,6 +64,7 @@ impl TaskEntity {
             id,
             goal,
             machine_id,
+            runtime_id: None,
             status: TaskStatus::Pending,
             timeline: Vec::new(),
             attention: None,
@@ -195,6 +200,12 @@ impl TaskStore {
         task_id
     }
 
+    /// Pin the task to the runtime returned by host-agent.
+    pub fn with_runtime(mut self, runtime_id: String) -> Self {
+        self.runtime_id = Some(runtime_id);
+        self
+    }
+
     /// Machine of the selected task — what the Runtime inspector shows.
     pub fn selected_machine(&self) -> Option<&MachineId> {
         self.selected_task().map(|task| &task.machine_id)
@@ -234,8 +245,18 @@ impl TaskStore {
         use spark_transport::TransportEvent;
 
         match event {
-            TransportEvent::TaskCreated { task_id, goal } => {
-                let task = TaskEntity::new(TaskId(task_id.clone()), goal.clone());
+            TransportEvent::TaskCreated {
+                task_id,
+                goal,
+                machine_id,
+                runtime_id,
+            } => {
+                let machine = machine_id.clone().unwrap_or_else(MachineId::local);
+                let task = TaskEntity::on_machine(machine, TaskId(task_id.clone()), goal.clone());
+                let task = runtime_id
+                    .clone()
+                    .map(|runtime_id| task.with_runtime(runtime_id))
+                    .unwrap_or(task);
                 self.add_task(task, cx);
             }
 
@@ -414,6 +435,19 @@ impl TaskStore {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
                     task.browser_snapshot = Some(frame.clone());
                     // Don't notify for every frame; use a timer-based refresh.
+                }
+            }
+
+            TransportEvent::BrowserFrame { runtime_id, data, .. }
+            | TransportEvent::ComputerFrame { runtime_id, data, .. } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
+                    task.browser_snapshot = Some(data.clone());
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
                 }
             }
 

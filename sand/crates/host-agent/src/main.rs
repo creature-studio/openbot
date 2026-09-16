@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use host_agent::{
     default_tool_registry, AgentLoop, AgentStatus, HostAgentApi, MachineManager, Model, MockModel,
@@ -392,27 +392,20 @@ fn run_agent(args: &[String]) {
         }
     }
 
-    // Which machine a runtime lives on. Tools read this; the session fills it in
-    // when the runtime is created. Until then a runtime is local.
-    let runtime_machines: Arc<Mutex<HashMap<String, MachineId>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
+    // Runtime ownership is maintained by MachineManager, including runtimes
+    // recovered after a bridge reconnect. Tool routing reads that one registry;
+    // it does not maintain a second process-local map.
     let manager_for_transport = manager.clone();
     let manager_for_machine = manager.clone();
     let manager_for_list = manager.clone();
-    let machines_for_lookup = runtime_machines.clone();
+    let manager_for_runtime = manager.clone();
 
     let ctx = ToolExecutionContext::with_runtime_machine(
         Arc::new(move |machine_id| manager_for_transport.transport(machine_id)),
         Arc::new(move |machine_id| manager_for_machine.get_machine(machine_id)),
         Arc::new(move || manager_for_list.list_machines()),
         machine_id.clone(),
-        Arc::new(move |runtime_id| {
-            machines_for_lookup
-                .lock()
-                .ok()
-                .and_then(|map| map.get(runtime_id).cloned())
-        }),
+        Arc::new(move |runtime_id| manager_for_runtime.runtime_machine_id(runtime_id)),
     );
 
     // Health checks run alongside the agent so the UI's status dots stay honest.
@@ -454,6 +447,7 @@ fn run_agent(args: &[String]) {
         let _ = persistence.save_session(
             &session.id,
             &session.runtime_id,
+            session.machine_id().as_str(),
             &session.model,
             session.status.as_str(),
             session.goal.as_deref(),

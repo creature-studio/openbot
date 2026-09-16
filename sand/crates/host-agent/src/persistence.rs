@@ -78,6 +78,7 @@ impl SqlitePersistence {
             CREATE TABLE IF NOT EXISTS session (
                 id TEXT PRIMARY KEY,
                 runtime_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL DEFAULT 'machine-local',
                 model TEXT,
                 status TEXT,
                 goal TEXT,
@@ -91,6 +92,7 @@ impl SqlitePersistence {
                 goal TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 runtime_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL DEFAULT 'machine-local',
                 status TEXT NOT NULL,
                 artifacts TEXT,
                 result TEXT,
@@ -117,6 +119,11 @@ impl SqlitePersistence {
             );
             "#
         )?;
+        // Existing installations predate machine pinning. SQLite has no
+        // `ADD COLUMN IF NOT EXISTS`, so an already-migrated database simply
+        // returns an ignorable "duplicate column" error for each statement.
+        let _ = state.exec("ALTER TABLE session ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'machine-local';");
+        let _ = state.exec("ALTER TABLE task ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'machine-local';");
         Ok(state)
     }
 
@@ -141,11 +148,12 @@ impl SqlitePersistence {
         Ok(())
     }
 
-    pub fn save_session(&self, id: &str, runtime_id: &str, model: &str, status: &str, goal: Option<&str>, cwd: &str, created_at: u64, updated_at: u64, messages: &str) -> Result<(), String> {
+    pub fn save_session(&self, id: &str, runtime_id: &str, machine_id: &str, model: &str, status: &str, goal: Option<&str>, cwd: &str, created_at: u64, updated_at: u64, messages: &str) -> Result<(), String> {
         let sql = format!(
-            "INSERT OR REPLACE INTO session (id, runtime_id, model, status, goal, cwd, created_at, updated_at, messages) VALUES ('{}', '{}', '{}', '{}', {}, '{}', {}, {}, '{}');",
+            "INSERT OR REPLACE INTO session (id, runtime_id, machine_id, model, status, goal, cwd, created_at, updated_at, messages) VALUES ('{}', '{}', '{}', '{}', '{}', {}, '{}', {}, {}, '{}');",
             escape_sql(id),
             escape_sql(runtime_id),
+            escape_sql(machine_id),
             escape_sql(model),
             escape_sql(status),
             goal.map(|g| format!("'{}'", escape_sql(g))).unwrap_or_else(|| "NULL".to_string()),
@@ -157,13 +165,14 @@ impl SqlitePersistence {
         self.exec(&sql)
     }
 
-    pub fn save_task(&self, id: &str, goal: &str, session_id: &str, runtime_id: &str, status: &str, artifacts: &str, result: Option<&str>, created_at: u64, updated_at: u64) -> Result<(), String> {
+    pub fn save_task(&self, id: &str, goal: &str, session_id: &str, runtime_id: &str, machine_id: &str, status: &str, artifacts: &str, result: Option<&str>, created_at: u64, updated_at: u64) -> Result<(), String> {
         let sql = format!(
-            "INSERT OR REPLACE INTO task (id, goal, session_id, runtime_id, status, artifacts, result, created_at, updated_at) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {});",
+            "INSERT OR REPLACE INTO task (id, goal, session_id, runtime_id, machine_id, status, artifacts, result, created_at, updated_at) VALUES ('{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, {}, {});",
             escape_sql(id),
             escape_sql(goal),
             escape_sql(session_id),
             escape_sql(runtime_id),
+            escape_sql(machine_id),
             escape_sql(status),
             escape_sql(artifacts),
             result.map(|r| format!("'{}'", escape_sql(r))).unwrap_or_else(|| "NULL".to_string()),

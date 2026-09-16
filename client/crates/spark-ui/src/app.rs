@@ -287,6 +287,8 @@ mod tests {
         assert!(!is_machine_event(&TransportEvent::TaskCreated {
             task_id: "t".into(),
             goal: "g".into(),
+            machine_id: None,
+            runtime_id: None,
         }));
     }
 }
@@ -312,7 +314,7 @@ impl RootView {
 
         // Copy the entity handles out of the read guard first: `cx.new` needs a
         // mutable borrow of the context, which a live guard would block.
-        let (bots, tasks, workbenches, machines, attention, connection) = {
+        let (bots, tasks, workbenches, machines, attention, connection, command_tx) = {
             let state = state.read(cx);
             (
                 state.bots.clone(),
@@ -321,14 +323,23 @@ impl RootView {
                 state.machines.clone(),
                 state.attention.clone(),
                 state.connection.clone(),
+                state.transport.command_sender(),
             )
         };
 
-        let sidebar = cx.new(|cx| Sidebar::new(bots, tasks.clone(), workbenches, machines.clone(), cx));
+        let sidebar = cx.new(|cx| Sidebar::new(bots, tasks.clone(), workbenches, machines.clone(), command_tx.clone(), cx));
         let timeline = cx.new(|cx| TaskTimeline::new(tasks.clone(), cx));
         let inspector = cx.new(|cx| Inspector::new(tasks.clone(), machines.clone(), cx));
-        let composer = cx.new(|cx| Composer::new(tasks, connection, cx));
-        let attention = cx.new(|cx| AttentionOverlay::with_machines(attention, machines, cx));
+        let composer = cx.new(|cx| {
+            Composer::new(
+                tasks,
+                connection,
+                machines.clone(),
+                command_tx.clone(),
+                cx,
+            )
+        });
+        let attention = cx.new(|cx| AttentionOverlay::with_machines(attention, machines, command_tx, cx));
 
         Self {
             state,
@@ -360,9 +371,12 @@ impl Render for RootView {
 
         // Clone what the element needs: a GPUI read guard cannot outlive the
         // statement that produced the returned element.
-        let (form_open, form) = {
-            let machines = self.state.read(cx).machines.read(cx);
-            (machines.form.open, machines.form.clone())
+        let (form_open, form, machines_entity, command_tx) = {
+            let state = self.state.read(cx);
+            let machines_entity = state.machines.clone();
+            let command_tx = state.transport.command_sender();
+            let machines = machines_entity.read(cx);
+            (machines.form.open, machines.form.clone(), machines_entity, command_tx)
         };
 
         div()
@@ -382,7 +396,7 @@ impl Render for RootView {
             .child(self.composer.clone())
             // The "+ Machine" form is a modal over the workspace.
             .when(form_open, move |root| {
-                root.child(crate::sidebar::render_add_machine_form(form))
+                root.child(crate::sidebar::render_add_machine_form(form, machines_entity.clone(), command_tx.clone()))
             })
             .child(self.attention.clone())
     }

@@ -1,5 +1,4 @@
-use super::session::AgentSessionId;
-use super::state::{TaskStatus, AgentStatus};
+use super::state::TaskStatus;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -16,7 +15,7 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(goal: String, session_id: AgentSessionId, runtime_id: String) -> Self {
+    pub fn new(goal: String, session_id: String, runtime_id: String) -> Self {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         Self {
             id: format!("task-{:x}-{}", now, std::process::id()),
@@ -58,7 +57,7 @@ impl TaskManager {
         Self { tasks: std::collections::HashMap::new() }
     }
 
-    pub fn create(&mut self, goal: String, session_id: AgentSessionId, runtime_id: String) -> String {
+    pub fn create(&mut self, goal: String, session_id: String, runtime_id: String) -> String {
         let task = Task::new(goal, session_id, runtime_id);
         let id = task.id.clone();
         self.tasks.insert(id.clone(), task);
@@ -80,6 +79,15 @@ impl TaskManager {
     pub fn complete(&mut self, id: &str, result: String) -> Result<(), String> {
         if let Some(task) = self.tasks.get_mut(id) {
             task.complete(result);
+            Ok(())
+        } else {
+            Err(format!("task {} not found", id))
+        }
+    }
+
+    pub fn fail(&mut self, id: &str, reason: String) -> Result<(), String> {
+        if let Some(task) = self.tasks.get_mut(id) {
+            task.fail(reason);
             Ok(())
         } else {
             Err(format!("task {} not found", id))

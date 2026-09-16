@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use spark_model::{Machine, MachineId};
+use spark_transport::{LocalTransport, RuntimeTransport};
 
 #[derive(Debug, Clone)]
 pub struct ToolDefinition {
@@ -146,12 +149,25 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.definition()).collect()
     }
 
+    /// Legacy no-context entry point. It is explicitly local (used by the
+    /// standalone local E2E/CLI), and still goes through LocalTransport. A
+    /// machine-aware agent must use `execute_with_context`, which cannot fall
+    /// back to this path.
     pub fn execute(&self, name: &str, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
-        if let Some(tool) = self.tools.get(name) {
-            tool.execute(args, runtime_id)
-        } else {
-            Err(format!("tool not found: {}", name))
-        }
+        let machine_id = MachineId::local();
+        let local_transport: Arc<dyn RuntimeTransport> = Arc::new(LocalTransport::new());
+        let machine = Machine::local(Some("Local".to_string()));
+        let transport_for_lookup = local_transport.clone();
+        let machine_for_lookup = machine.clone();
+        let local_for_runtime = machine_id.clone();
+        let ctx = ToolExecutionContext::with_runtime_machine(
+            Arc::new(move |id| if id == &MachineId::local() { Some(transport_for_lookup.clone()) } else { None }),
+            Arc::new(move |id| if id == &machine_for_lookup.id { Some(machine_for_lookup.clone()) } else { None }),
+            Arc::new(move || vec![machine.clone()]),
+            machine_id.clone(),
+            Arc::new(move |_runtime_id| Some(local_for_runtime.clone())),
+        );
+        self.execute_with_context(name, args, runtime_id, Some(&ctx))
     }
 
     /// Execute with machine routing context (Phase 3).

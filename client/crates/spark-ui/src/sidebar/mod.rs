@@ -29,6 +29,7 @@
 use gpui::{
     div, px, prelude::*, App, Context, Entity, IntoElement, Render, SharedString, Window,
 };
+use spark_transport::{TransportCommand};
 use crate::stores::{BotStore, TaskStore, WorkbenchStore, MachineStore};
 use crate::machine::MachinePanel;
 use spark_model::{TaskStatus, MachineStatus};
@@ -38,6 +39,7 @@ pub struct Sidebar {
     tasks: Entity<TaskStore>,
     workbenches: Entity<WorkbenchStore>,
     machines: Entity<MachineStore>,
+    command_tx: tokio::sync::mpsc::UnboundedSender<TransportCommand>,
 }
 
 impl Sidebar {
@@ -46,6 +48,7 @@ impl Sidebar {
         tasks: Entity<TaskStore>,
         workbenches: Entity<WorkbenchStore>,
         machines: Entity<MachineStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<TransportCommand>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&bots, |_, _, cx| cx.notify()).detach();
@@ -57,6 +60,7 @@ impl Sidebar {
             tasks,
             workbenches,
             machines,
+            command_tx,
         }
     }
 }
@@ -202,6 +206,7 @@ impl Sidebar {
                 .child(MachinePanel::render_sidebar_list(
                     machines.machines.clone(),
                     machines.selected.clone(),
+                    self.machines.clone(),
                 )),
         );
 
@@ -249,7 +254,11 @@ impl Sidebar {
 }
 
 /// The "+ Machine" form, rendered as a centred card by the app shell.
-pub fn render_add_machine_form(form: crate::stores::machine::MachineForm) -> impl IntoElement {
+pub fn render_add_machine_form(
+    form: crate::stores::machine::MachineForm,
+    store: Entity<MachineStore>,
+    command_tx: tokio::sync::mpsc::UnboundedSender<TransportCommand>,
+) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
@@ -257,5 +266,5 @@ pub fn render_add_machine_form(form: crate::stores::machine::MachineForm) -> imp
         .items_center()
         .justify_center()
         .bg(gpui::rgba(0x00000080))
-        .child(MachinePanel::render_add_form(form))
+        .child(MachinePanel::render_add_form(form, store, command_tx))
 }

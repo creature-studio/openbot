@@ -16,6 +16,19 @@ use crate::browser::BrowserManager;
 use crate::computer::ComputerManager;
 use crate::desktop::DesktopManager;
 
+fn expand_home(path: PathBuf) -> PathBuf {
+    if path == Path::new("~") || path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            if path == Path::new("~") {
+                return PathBuf::from(home);
+            }
+            let suffix = path.strip_prefix("~/").unwrap_or_else(|_| Path::new(""));
+            return PathBuf::from(home).join(suffix);
+        }
+    }
+    path
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LeaseOwner {
     Task(String),      // task_id
@@ -166,14 +179,16 @@ impl RuntimeManager {
         let machine_id = machine_id.unwrap_or_else(sand_protocol::local_host_machine_id);
         let id = RuntimeId::new();
         let now = now_ms();
-        let ws = workspace.unwrap_or_else(|| {
-            let base = if Path::new("/workspace").exists() {
-                PathBuf::from("/workspace")
-            } else {
-                PathBuf::from("/tmp")
-            };
-            base.join(format!("sand-runtime-{}", id.0))
-        });
+        let ws = workspace
+            .map(expand_home)
+            .unwrap_or_else(|| {
+                let base = if Path::new("/workspace").exists() {
+                    PathBuf::from("/workspace")
+                } else {
+                    PathBuf::from("/tmp")
+                };
+                base.join(format!("sand-runtime-{}", id.0))
+            });
 
         let _ = fs::create_dir_all(&ws);
 

@@ -55,6 +55,8 @@ pub enum TransportEvent {
     TaskCreated {
         task_id: String,
         goal: String,
+        machine_id: Option<MachineId>,
+        runtime_id: Option<String>,
     },
     TaskStatusChanged {
         task_id: String,
@@ -129,6 +131,24 @@ pub enum TransportEvent {
     BrowserScreenshot {
         task_id: String,
         frame: Vec<u8>,
+    },
+    /// A runtime-addressed browser frame delivered over the host-agent link.
+    /// The frame is payload data, not just a width/height diagnostic.
+    BrowserFrame {
+        runtime_id: String,
+        frame_id: u64,
+        width: u32,
+        height: u32,
+        format: String,
+        data: Vec<u8>,
+    },
+    ComputerFrame {
+        runtime_id: String,
+        frame_id: u64,
+        width: u32,
+        height: u32,
+        format: String,
+        data: Vec<u8>,
     },
     BrowserAction {
         task_id: String,

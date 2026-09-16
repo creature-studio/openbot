@@ -39,8 +39,13 @@ impl HostAgentApi {
     /// The machine-aware API: sessions, tasks and workbenches can pick a
     /// machine, and every runtime knows which machine it lives on.
     pub fn with_machines(machines: Arc<MachineManager>) -> Self {
+        let local = MachineId::local();
+        let transport = machines
+            .transport(&local)
+            .unwrap_or_else(|| Arc::new(spark_transport::LocalTransport::new()));
         Self {
             machines: Some(machines),
+            workbench_mgr: std::sync::Mutex::new(WorkbenchManager::with_transport(transport, local)),
             ..Self::new()
         }
     }

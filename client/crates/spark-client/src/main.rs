@@ -151,6 +151,13 @@ async fn run_host_agent_link(socket: PathBuf) -> Result<()> {
 
     // The UI side of the same link.
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<TransportCommand>();
+    // AppState forwards its command queue through the GPUI link module. Install
+    // the actual socket writer before the window is created so add-machine,
+    // composer, and runtime actions are not silently dropped.
+    let command_sink = command_tx.clone();
+    spark_ui::install_command_sender(move |command| {
+        let _ = command_sink.send(command);
+    });
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // Commands → JSON lines.
@@ -300,6 +307,56 @@ fn event_to_transport_event(line: &str) -> EventAction {
                 },
             ),
         }),
+        "task_created" => EventAction::Emit(TransportEvent::TaskCreated {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            goal: value.get("goal").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            machine_id: value.get("machine_id").and_then(|v| v.as_str()).map(|id| MachineId::from_string(id.to_string())),
+            runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).map(str::to_string),
+        }),
+        "task_stopped" => EventAction::Emit(TransportEvent::TaskStatusChanged {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            status: "cancelled".to_string(),
+        }),
+        "check_confirmed" => EventAction::Emit(TransportEvent::CheckConfirmed {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "browser_frame" | "computer_frame" => {
+            let runtime_id = value
+                .get("runtime_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let frame_id = value.get("frame_id").and_then(|v| v.as_u64()).unwrap_or(0);
+            let width = value.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let height = value.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let format = value
+                .get("format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("png")
+                .to_string();
+            let Some(data) = value.get("data").and_then(|v| v.as_str()).and_then(base64_decode) else {
+                return EventAction::Ignore;
+            };
+            if event == "browser_frame" {
+                EventAction::Emit(TransportEvent::BrowserFrame {
+                    runtime_id,
+                    frame_id,
+                    width,
+                    height,
+                    format,
+                    data,
+                })
+            } else {
+                EventAction::Emit(TransportEvent::ComputerFrame {
+                    runtime_id,
+                    frame_id,
+                    width,
+                    height,
+                    format,
+                    data,
+                })
+            }
+        }
         "runtimes" => {
             let machine_id = MachineId::from_string(
                 value
@@ -398,13 +455,77 @@ fn command_to_json(command: &TransportCommand) -> Option<String> {
             escape(kind),
             escape(workspace)
         ),
-        TransportCommand::Connect => r#"{"cmd":"list_machines"}"#.to_string(),
-        // Task / terminal / browser commands travel on the same socket once the
-        // session layer is wired in (they need a runtime id, which arrives with
-        // the MachinesUpdated reply).
-        _ => return None,
+        TransportCommand::Connect => r#"{"cmd":"connect"}"#.to_string(),
+        TransportCommand::Disconnect => r#"{"cmd":"disconnect"}"#.to_string(),
+        TransportCommand::OpenTerminal { machine_id, runtime_id, terminal_id, cols, rows } => format!(
+            r#"{{"cmd":"open_terminal","machine_id":"{}","runtime_id":"{}","terminal_id":"{}","cols":{},"rows":{}}}"#,
+            escape(machine_id.as_str()), escape(runtime_id), escape(terminal_id), cols, rows
+        ),
+        TransportCommand::WriteTerminal { machine_id, runtime_id, terminal_id, data } => format!(
+            r#"{{"cmd":"write_terminal","machine_id":"{}","runtime_id":"{}","terminal_id":"{}","data":"{}"}}"#,
+            escape(machine_id.as_str()), escape(runtime_id), escape(terminal_id), escape(&String::from_utf8_lossy(data))
+        ),
+        TransportCommand::ResizeTerminal { machine_id, runtime_id, terminal_id, cols, rows } => format!(
+            r#"{{"cmd":"resize_terminal","machine_id":"{}","runtime_id":"{}","terminal_id":"{}","cols":{},"rows":{}}}"#,
+            escape(machine_id.as_str()), escape(runtime_id), escape(terminal_id), cols, rows
+        ),
+        TransportCommand::CloseTerminal { machine_id, runtime_id, terminal_id } => format!(
+            r#"{{"cmd":"close_terminal","machine_id":"{}","runtime_id":"{}","terminal_id":"{}"}}"#,
+            escape(machine_id.as_str()), escape(runtime_id), escape(terminal_id)
+        ),
+        TransportCommand::CreateTask { machine_id, goal } => format!(
+            r#"{{"cmd":"create_task","machine_id":"{}","goal":"{}"}}"#,
+            escape(machine_id.as_str()), escape(goal)
+        ),
+        TransportCommand::SendTaskMessage { task_id, content } => format!(
+            r#"{{"cmd":"send_task_message","task_id":"{}","content":"{}"}}"#,
+            escape(task_id), escape(content)
+        ),
+        TransportCommand::StopTask { task_id } => format!(r#"{{"cmd":"stop_task","task_id":"{}"}}"#, escape(task_id)),
+        TransportCommand::ApprovePermission { task_id, permission_id } => format!(r#"{{"cmd":"approve_permission","task_id":"{}","permission_id":"{}"}}"#, escape(task_id), escape(permission_id)),
+        TransportCommand::DenyPermission { task_id, permission_id } => format!(r#"{{"cmd":"deny_permission","task_id":"{}","permission_id":"{}"}}"#, escape(task_id), escape(permission_id)),
+        TransportCommand::ConfirmComplete { task_id } => format!(r#"{{"cmd":"confirm_complete","task_id":"{}"}}"#, escape(task_id)),
+        TransportCommand::BrowserAction { runtime_id, action } => browser_command(runtime_id, action),
+        TransportCommand::ComputerAction { runtime_id, action } => computer_command(runtime_id, action),
+        TransportCommand::SubscribeBrowser { runtime_id } => format!(r#"{{"cmd":"subscribe_browser","runtime_id":"{}"}}"#, escape(runtime_id)),
+        TransportCommand::UnsubscribeBrowser { runtime_id } => format!(r#"{{"cmd":"unsubscribe_browser","runtime_id":"{}"}}"#, escape(runtime_id)),
+        TransportCommand::Shutdown => r#"{"cmd":"shutdown"}"#.to_string(),
     };
     Some(line)
+}
+
+fn browser_command(runtime_id: &str, action: &spark_transport::BrowserAction) -> String {
+    let (kind, fields) = match action {
+        spark_transport::BrowserAction::Open { url } => ("open", format!(r#""url":"{}""#, escape(url))),
+        spark_transport::BrowserAction::Snapshot => ("snapshot", String::new()),
+        spark_transport::BrowserAction::Click { reference } => ("click", format!(r#""ref":"{}""#, escape(reference))),
+        spark_transport::BrowserAction::Fill { reference, text } => ("fill", format!(r#""ref":"{}","text":"{}""#, escape(reference), escape(text))),
+        spark_transport::BrowserAction::Press { key } => ("press", format!(r#""key":"{}""#, escape(key))),
+        spark_transport::BrowserAction::Screenshot { format, quality } => ("screenshot", format!(r#""format":"{}","quality":{}"#, escape(format), quality)),
+        spark_transport::BrowserAction::Tabs => ("tabs", String::new()),
+        spark_transport::BrowserAction::Close => ("close", String::new()),
+    };
+    if fields.is_empty() {
+        format!(r#"{{"cmd":"browser_action","runtime_id":"{}","action":"{}"}}"#, escape(runtime_id), kind)
+    } else {
+        format!(r#"{{"cmd":"browser_action","runtime_id":"{}","action":"{}","{}"}}"#, escape(runtime_id), kind, fields)
+    }
+}
+
+fn computer_command(runtime_id: &str, action: &spark_transport::ComputerAction) -> String {
+    let (kind, fields) = match action {
+        spark_transport::ComputerAction::Screenshot => ("screenshot", String::new()),
+        spark_transport::ComputerAction::Click { x, y, button } => ("click", format!(r#""x":{},"y":{},"button":"{}""#, x, y, escape(button))),
+        spark_transport::ComputerAction::Type { text } => ("type", format!(r#""text":"{}""#, escape(text))),
+        spark_transport::ComputerAction::Move { x, y } => ("move", format!(r#""x":{},"y":{}"#, x, y)),
+        spark_transport::ComputerAction::Key { key } => ("key", format!(r#""key":"{}""#, escape(key))),
+        spark_transport::ComputerAction::Scroll { x, y, delta } => ("scroll", format!(r#""x":{},"y":{},"delta":{}"#, x, y, delta)),
+    };
+    if fields.is_empty() {
+        format!(r#"{{"cmd":"computer_action","runtime_id":"{}","action":"{}"}}"#, escape(runtime_id), kind)
+    } else {
+        format!(r#"{{"cmd":"computer_action","runtime_id":"{}","action":"{}","{}"}}"#, escape(runtime_id), kind, fields)
+    }
 }
 
 fn machine_command(cmd: &str, machine_id: &MachineId) -> String {
@@ -428,6 +549,40 @@ fn escape(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut values = Vec::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' => values.push(byte - b'A'),
+            b'a'..=b'z' => values.push(byte - b'a' + 26),
+            b'0'..=b'9' => values.push(byte - b'0' + 52),
+            b'+' => values.push(62),
+            b'/' => values.push(63),
+            b'=' => break,
+            b'\n' | b'\r' | b' ' | b'\t' => {}
+            _ => return None,
+        }
+    }
+    if values.len() < 2 {
+        return Some(Vec::new());
+    }
+    let mut output = Vec::with_capacity(values.len() / 4 * 3);
+    for chunk in values.chunks(4) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        let d = chunk.get(3).copied().unwrap_or(0) as u32;
+        output.push(((a << 2) | (b >> 4)) as u8);
+        if chunk.len() > 2 {
+            output.push(((b << 4) | (c >> 2)) as u8);
+        }
+        if chunk.len() > 3 {
+            output.push(((c << 6) | d) as u8);
+        }
+    }
+    Some(output)
 }
 
 #[cfg(test)]
@@ -476,4 +631,17 @@ mod tests {
             _ => panic!("expected a refresh"),
         }
     }
+    #[test]
+    fn frame_events_decode_runtime_payloads() {
+        let line = r#"{"event":"browser_frame","runtime_id":"rt-1","frame_id":7,"width":2,"height":1,"format":"png","data":"aGVsbG8="}"#;
+        match event_to_transport_event(line) {
+            EventAction::Emit(TransportEvent::BrowserFrame { runtime_id, frame_id, data, .. }) => {
+                assert_eq!(runtime_id, "rt-1");
+                assert_eq!(frame_id, 7);
+                assert_eq!(data, b"hello".to_vec());
+            }
+            _ => panic!("expected a decoded browser frame"),
+        }
+    }
+
 }

@@ -6,7 +6,7 @@
 
 Spark 的 GPUI 客户端可以添加 SSH 机器，Task / Workbench / Bot / AgentSession 都可以选择 **Local** 或 **SSH 远程机器**，而**上层 agent 完全感知不到本地/远程差异**。
 
-硬性约束（全部已落到代码里，`sand/check_spark.sh` 会逐条检查）：
+硬性约束与证据（`sand/check_spark.sh` 覆盖静态安全/边界不变量；编译、真实 SSH 和完整模型会话不能由静态检查替代）：
 
 | 约束 | 实现位置 |
 | --- | --- |
@@ -220,13 +220,13 @@ ReadyForCheck → Confirm Complete
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| R1 | 机器抽象（Machine/MachineId/RuntimeTransport/tool 路由），本地 E2E 不回归 | 代码完成；`sand/test_full.sh` 为本地回归入口 |
-| R2 | SSH 连接 / ping / status / exec（OpenSSH 复用，安全默认值） | 代码完成（`ssh/mod.rs`，含 argv 单测） |
-| R3 | sand bridge（一条长连接、多路复用、无 per-call ssh） | 代码完成（帧协议在本地沙箱实测） |
-| R4 | bootstrap（uname → 上传 → sha256 → `--version` → 启动） | 代码完成 |
-| R5 | 完整 Runtime（create/exec/PTY/FS/destroy）经 transport | 代码完成 |
-| R6 | browser / computer（Xvfb + Chrome、截图丢帧、desktop 能力开关） | 代码完成（沙箱内为纯文本/JSON 路径验证） |
-| R7 | GPUI Machines UI + Runtime Inspector + host-key 卡片 | 代码完成（`spark-ui` 为仓库原有骨架风格，交互 API 未在本机编译过） |
+| R1 | 机器抽象（Machine/MachineId/RuntimeTransport/tool 路由） | 静态实现；必须通过 workspace 编译与本地 E2E 才能升级为完成 |
+| R2 | SSH 连接 / ping / status / exec（OpenSSH 复用，安全默认值） | 静态实现；真实 OpenSSH 结果未在此环境取得 |
+| R3 | sand bridge（一条长连接、多路复用、无 per-call ssh） | 静态实现；协议单测与真实 bridge 仍需 cargo 执行 |
+| R4 | bootstrap（uname → 上传 → sha256 → `--version` → 启动） | 静态实现；未取得真实远端 bootstrap 证据 |
+| R5 | 完整 Runtime（create/exec/PTY/FS/destroy）经 transport | 代码路径已统一；未取得 build/E2E 证据 |
+| R6 | browser / computer（Xvfb + Chrome、截图丢帧、desktop 能力开关） | capability 检测与 transport 已接入；远端浏览器未验证 |
+| R7 | GPUI Machines UI + Runtime Inspector + host-key 卡片 | 已接入行选择、添加/测试/信任/取消事件；表单输入仍需在有 GPUI 工具链的环境编译验证 |
 
 ## 12. 验证方式（重要）
 
@@ -255,10 +255,19 @@ sand/test_remote_ssh.sh
 
 **尚未完成的验证**：以上 2)–4) 都需要在真实机器/工具链上执行；本仓库当前只完成了实现与静态自检。第一次跑 `test_remote_ssh.sh` 会在未知主机密钥处停下并打印指纹 —— 那是设计行为，确认一次即可继续。
 
-## 13. 已知限制
+## 13. 当前验证记录（2026-09-16 UTC）
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| `sand/check_spark.sh` | 通过 | 静态安全、24-byte framing、UDS、transport、machine routing、reconnect、host-key、persistence、GPUI surface invariants 全部通过 |
+| Rust workspace build/test | 未执行 | 当前运行环境没有 `cargo`、`rustc` 或 `rustup` |
+| `sand/test_remote_ssh.sh` | 阻塞，未进入 SSH | 脚本在 preconditions 处退出：未设置 `SPARK_SSH_HOST`；因此没有伪造 bootstrap/runtime/exec/PTY/FS/browser/disconnect/reconnect/destroy 结果 |
+| 真实 SSH Linux E2E | 未完成 | 必须在有 Rust 工具链且可达 Linux SSH 主机的环境重新运行上述脚本；本次不能声称验收完成 |
+
+## 14. 已知限制
 
 * v1 不做机器迁移/切换：Task 与 Workbench 的机器创建后固定。
 * bootstrap 只支持 `linux-x86_64` / `linux-aarch64`。
 * `computer.*` 在 `capabilities.desktop == false` 的机器上被禁用（Sandbox/无 Xvfb）。
 * 浏览器预览是截图流（丢旧帧），不是 VNC/嵌入式 WebView。
-* `host-agent serve` 目前承载机器域命令；task/terminal/browser 命令复用同一 socket，但需要 session 层接线后才全部可用（`command_to_json` 已留好位置）。
+* `host-agent serve` 与 GPUI 现在在同一 newline-JSON UDS 上覆盖 machine、runtime、task/session 状态、PTY、browser、computer 命令；实际 AgentLoop/模型执行仍由 host-agent 的 session runner 接管，serve 的 task 命令只负责创建/持久化 pinned session 与传递消息，不能把它当成已完成的在线模型 E2E。

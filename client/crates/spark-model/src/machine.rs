@@ -286,7 +286,7 @@ impl MachineCapabilities {
             // Browser support needs a sandd that advertises it *and* is not a
             // bare remote host; the remote side spawns Xvfb + Chrome itself.
             browser: has("browser"),
-            computer_use: has("computer") && has_display,
+            computer_use: (has("computer") || has("computer.desktop")) && has_display,
             desktop: has_display,
             gpu,
         }
@@ -463,7 +463,13 @@ impl Machine {
     /// Falls back from `sand bridge` to `sandd bridge` so that a machine which
     /// only has the sandd binary bootstrapped still works.
     pub fn bridge_remote_command(socket: &str) -> String {
-        let escaped = socket.replace('\'', "'\\''");
+        // Preserve `~/.cache/...`: single-quoting a tilde would make the
+        // bridge look for a literal directory named `~` on the remote host.
+        let socket_arg = if let Some(suffix) = socket.strip_prefix("~/") {
+            format!("\"$HOME/{suffix}\"")
+        } else {
+            format!("'{}'", socket.replace('\'', "'\\''"))
+        };
         // Prefer the `sand` wrapper on PATH; fall back to the bootstrapped
         // binaries, so a machine that only has sandd still works.
         let candidates = [
@@ -475,7 +481,7 @@ impl Machine {
         for (index, candidate) in candidates.iter().enumerate() {
             let keyword = if index == 0 { "if" } else { "elif" };
             script.push_str(&format!(
-                "{keyword} command -v {candidate} >/dev/null 2>&1; then {candidate} bridge --socket '{escaped}'; "
+                "{keyword} command -v {candidate} >/dev/null 2>&1; then {candidate} bridge --socket {socket_arg}; "
             ));
         }
         script.push_str(

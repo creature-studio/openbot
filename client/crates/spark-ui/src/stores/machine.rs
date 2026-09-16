@@ -58,6 +58,17 @@ pub struct MachineForm {
     pub open: bool,
 }
 
+/// A field in the add-machine form. The form uses GPUI's keyboard events so
+/// it remains editable without giving the UI any SSH-specific input widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineFormField {
+    Name,
+    Host,
+    User,
+    Port,
+    SshConfigHost,
+}
+
 impl MachineForm {
     pub fn open() -> Self {
         Self {
@@ -78,7 +89,11 @@ impl MachineForm {
         if name.is_empty() {
             return None;
         }
-        let alias = self.ssh_config_host.trim();
+        let alias = if self.use_ssh_config {
+            self.ssh_config_host.trim()
+        } else {
+            ""
+        };
         let host = if !alias.is_empty() {
             alias
         } else if !self.host.trim().is_empty() {
@@ -203,6 +218,59 @@ impl MachineStore {
     pub fn close_form(&mut self, cx: &mut Context<Self>) {
         self.form.close();
         cx.notify();
+    }
+
+    /// Edit one form field from a focused GPUI field. This intentionally keeps
+    /// cursor management simple (the form is short and edits append at the end)
+    /// while still providing real keyboard input, deletion, and IME-produced
+    /// `key_char` values instead of rendering inert labels.
+    pub fn edit_form_field(
+        &mut self,
+        field: MachineFormField,
+        key: &str,
+        key_char: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let value = match field {
+            MachineFormField::Name => &mut self.form.name,
+            MachineFormField::Host => &mut self.form.host,
+            MachineFormField::User => &mut self.form.user,
+            MachineFormField::Port => &mut self.form.port,
+            MachineFormField::SshConfigHost => &mut self.form.ssh_config_host,
+        };
+        if key.eq_ignore_ascii_case("backspace") || key.eq_ignore_ascii_case("delete") {
+            value.pop();
+        } else if !matches!(key_char, Some(text) if text.is_empty()) {
+            if let Some(text) = key_char.filter(|text| !text.is_empty()) {
+                if !text.chars().any(|c| c.is_control()) {
+                    value.push_str(text);
+                }
+            } else if key.chars().count() == 1 && !key.chars().next().unwrap_or_default().is_control() {
+                value.push_str(key);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_ssh_config(&mut self, cx: &mut Context<Self>) {
+        self.form.use_ssh_config = !self.form.use_ssh_config;
+        cx.notify();
+    }
+
+    /// Cycle the composer through the registered machines. The selected
+    /// machine is the creation-time routing key; it is never changed for an
+    /// existing task/runtime.
+    pub fn select_next(&mut self, cx: &mut Context<Self>) {
+        if self.machines.is_empty() {
+            return;
+        }
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.machines.iter().position(|machine| &machine.id == id))
+            .unwrap_or(0);
+        let next = (current + 1) % self.machines.len();
+        self.select(Some(self.machines[next].id.clone()), cx);
     }
 
     /// "+ Machine" → Test connection: `ssh host true` through host-agent.

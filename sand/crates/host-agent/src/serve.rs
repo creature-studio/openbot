@@ -44,7 +44,8 @@
 //! directory: only the user can drive their own machines.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -55,6 +56,7 @@ use spark_model::{MachineId, MachineStatus};
 use spark_transport::{BootstrapSummary, RuntimeInfo};
 use spark_transport::MachineDraft;
 
+use crate::agent::{AgentSession, TaskManager};
 use crate::machine::{MachineEvent, MachineManager};
 
 /// Where the client socket lives.
@@ -72,8 +74,22 @@ pub fn default_socket_path() -> PathBuf {
         .join("host-agent.sock")
 }
 
+/// State shared by all GPUI socket clients. Sessions/tasks are host-agent
+/// state, not GPUI state, so closing the client does not lose remote work.
+struct ServeState {
+    sessions: Mutex<HashMap<String, AgentSession>>,
+    tasks: Mutex<TaskManager>,
+}
+
+impl ServeState {
+    fn new() -> Self {
+        Self { sessions: Mutex::new(HashMap::new()), tasks: Mutex::new(TaskManager::new()) }
+    }
+}
+
 /// Serve until `shutdown` or SIGTERM.
 pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -> Result<()> {
+    let state = Arc::new(ServeState::new());
     let socket_path = socket_path.unwrap_or_else(default_socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
@@ -100,6 +116,26 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
         }));
     }
 
+    // Recover saved remote machines in the background. A host-agent restart must
+    // not turn an existing remote runtime into a new task: reconnect the bridge,
+    // then publish the machine's runtime inventory so the client can reattach.
+    {
+        let manager = manager.clone();
+        let broadcast_tx = broadcast_tx.clone();
+        tokio::spawn(async move {
+            for machine in manager.list_machines() {
+                if matches!(machine.kind, spark_model::MachineKind::Local) {
+                    continue;
+                }
+                if manager.connect_machine(&machine.id).await.is_ok() {
+                    if let Ok(runtimes) = manager.list_runtimes(&machine.id).await {
+                        let _ = broadcast_tx.send(runtimes_json(&machine.id, &runtimes));
+                    }
+                }
+            }
+        });
+    }
+
     // Health loop: status dots must stay honest without the client asking.
     {
         let manager = manager.clone();
@@ -117,6 +153,7 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
     loop {
         let (stream, _addr) = listener.accept().await.context("accepting a client")?;
         let manager = manager.clone();
+        let state = state.clone();
         let mut broadcast_rx = broadcast_rx.resubscribe();
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -149,7 +186,7 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(reply) = handle_command(&manager, &line).await {
+                if let Some(reply) = handle_command(&manager, &state, &line).await {
                     if reply == "__shutdown__" {
                         let _ = reply_tx.send(
                             "{\"event\":\"ok\",\"cmd\":\"shutdown\"}".to_string(),
@@ -167,7 +204,7 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
 }
 
 /// Dispatch one command line. Returns the reply line, when there is one.
-async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<String> {
+async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, line: &str) -> Option<String> {
     let value: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(e) => {
@@ -184,6 +221,11 @@ async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<Str
         .to_string();
 
     match cmd.as_str() {
+        "connect" | "disconnect" => Some(ok_json(&cmd)),
+        "connect" => Some(machines_json(manager)),
+        // The GPUI-to-host-agent UDS is owned by spark-client; disconnecting
+        // that logical link must not tear down SSH machines or remote runtimes.
+        "disconnect" => Some(ok_json(&cmd)),
         "list_machines" => Some(machines_json(manager)),
         "add_machine" => {
             let Some(draft) = draft_from_json(&value) else {
@@ -219,6 +261,146 @@ async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<Str
                 )),
             }
         }
+        "create_runtime" => {
+            let machine_id = match value.get("machine_id").and_then(|v| v.as_str()) {
+                Some(id) => MachineId::from_string(id.to_string()),
+                None => return Some(error_json(&cmd, "machine_id is required")),
+            };
+            let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("assistant");
+            let workspace = value.get("workspace").and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(str::to_string);
+            match manager.create_runtime(&machine_id, kind, workspace).await {
+                Ok(_) => match manager.list_runtimes(&machine_id).await {
+                    Ok(runtimes) => Some(runtimes_json(&machine_id, &runtimes)),
+                    Err(e) => Some(error_json(&cmd, &e.to_string())),
+                },
+                Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
+        }
+        "create_task" => {
+            let machine_id = match value.get("machine_id").and_then(|v| v.as_str()) {
+                Some(id) => MachineId::from_string(id.to_string()),
+                None => return Some(error_json(&cmd, "machine_id is required")),
+            };
+            let goal = value.get("goal").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            match manager.create_runtime(&machine_id, "assistant", None).await {
+                Ok(runtime) => {
+                    let session = AgentSession::on_machine(machine_id.clone(), runtime.id.clone(), "default".into());
+                    let session_id = session.id.clone();
+                    let created = state.tasks.lock().ok().and_then(|mut tasks| {
+                        let task_id = tasks.create(goal.clone(), session.id.clone(), runtime.id.clone());
+                        tasks.get(&task_id).cloned()
+                    });
+                    if let Some(task) = created {
+                        manager.persist_session(&session);
+                        manager.persist_task(&task, &machine_id);
+                        if let Ok(mut sessions) = state.sessions.lock() { sessions.insert(session_id.clone(), session); }
+                        Some(format!("{{\"event\":\"task_created\",\"task_id\":\"{}\",\"session_id\":\"{}\",\"machine_id\":\"{}\",\"runtime_id\":\"{}\",\"goal\":\"{}\"}}", escape(&task.id), escape(&session_id), escape(machine_id.as_str()), escape(&runtime.id), escape(&goal)))
+                    } else { Some(error_json(&cmd, "task state unavailable")) }
+                }
+                Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
+        }
+        "send_task_message" => {
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let content = value.get("content").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let session_id = state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id).map(|task| task.session_id.clone()));
+            let updated_session = session_id.as_ref().and_then(|id| {
+                state.sessions.lock().ok().and_then(|mut sessions| {
+                    let session = sessions.get_mut(id)?;
+                    session.add_user_message(content);
+                    Some(session.clone())
+                })
+            });
+            match updated_session {
+                Some(session) => {
+                    manager.persist_session(&session);
+                    Some(format!("{{\"event\":\"task_message_accepted\",\"task_id\":\"{}\",\"session_id\":\"{}\"}}", escape(task_id), escape(&session.id)))
+                }
+                None => Some(error_json(&cmd, "task not found")),
+            }
+        }
+        "stop_task" => {
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let result = state.tasks.lock().map_err(|_| "task state unavailable".to_string()).and_then(|mut tasks| {
+                tasks.fail(task_id, "stopped by user".into())?;
+                tasks.get(task_id).cloned().ok_or_else(|| "task not found".to_string())
+            });
+            match result {
+                Ok(task) => {
+                    let session = state.sessions.lock().ok().and_then(|sessions| sessions.get(&task.session_id).cloned());
+                    if let Some(session) = session { manager.persist_task(&task, &session.machine_id); }
+                    Some(format!("{{\"event\":\"task_stopped\",\"task_id\":\"{}\"}}", escape(task_id)))
+                }
+                Err(e) => Some(error_json(&cmd, &e)),
+            }
+        }
+        "subscribe_browser" | "unsubscribe_browser" => Some(ok_json(&cmd)),
+        "approve_permission" | "deny_permission" => {
+            // Permission decisions are host-agent state changes; they never
+            // cause a client-side local execution.
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            if state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id)).is_none() {
+                Some(error_json(&cmd, "task not found"))
+            } else {
+                Some(format!("{{\"event\":\"{}\",\"task_id\":\"{}\"}}", cmd, escape(task_id)))
+            }
+        }
+        "confirm_complete" => {
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let task = state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id).cloned());
+            let Some(task) = task else { return Some(error_json(&cmd, "task not found")); };
+            let session = state.sessions.lock().ok().and_then(|sessions| sessions.get(&task.session_id).cloned());
+            let Some(session) = session else { return Some(error_json(&cmd, "session not found")); };
+            match manager.destroy_runtime(&session.machine_id, &task.runtime_id).await {
+                Ok(()) => {
+                    if let Ok(mut tasks) = state.tasks.lock() {
+                        let _ = tasks.complete(task_id, "confirmed by user".into());
+                        if let Some(updated) = tasks.get(task_id).cloned() {
+                            manager.persist_task(&updated, &session.machine_id);
+                        }
+                    }
+                    Some(format!("{{\"event\":\"check_confirmed\",\"task_id\":\"{}\"}}", escape(task_id)))
+                }
+                Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
+        }
+        "open_terminal" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let request = spark_transport::PtyOpenRequest { runtime_id: runtime_id.clone(), pty_id: terminal_id.clone(), cols: value.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16, rows: value.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16, shell: "/bin/bash".into() };
+            match manager.open_pty(&runtime_id, request).await { Ok(()) => Some(format!("{{\"event\":\"terminal_opened\",\"runtime_id\":\"{}\",\"terminal_id\":\"{}\"}}", escape(&runtime_id), escape(&terminal_id))), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+        }
+        "write_terminal" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let data = value.get("data").and_then(|v| v.as_str()).unwrap_or_default().as_bytes().to_vec();
+            match manager.write_pty(&runtime_id, spark_transport::PtyWriteRequest { runtime_id: runtime_id.clone(), pty_id: terminal_id.clone(), data }).await { Ok(()) => Some(ok_json(&cmd)), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+        }
+        "resize_terminal" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let request = spark_transport::PtyResizeRequest { runtime_id: runtime_id.clone(), pty_id: terminal_id, cols: value.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16, rows: value.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16 };
+            match manager.resize_pty(&runtime_id, request).await { Ok(()) => Some(ok_json(&cmd)), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+        }
+        "close_terminal" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default();
+            match manager.close_pty(runtime_id, terminal_id).await { Ok(()) => Some(ok_json(&cmd)), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+        }
+        "browser_action" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let Some(action) = browser_action_from_json(&value) else { return Some(error_json(&cmd, "invalid browser action")); };
+            match manager.browser_request(&runtime_id, spark_transport::BrowserRequest { runtime_id: runtime_id.clone(), action }).await {
+                Ok(response) => Some(browser_response_json(&runtime_id, &response)), Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
+        }
+        "computer_action" => {
+            let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let Some(action) = computer_action_from_json(&value) else { return Some(error_json(&cmd, "invalid computer action")); };
+            match manager.computer_request(&runtime_id, spark_transport::ComputerRequest { runtime_id: runtime_id.clone(), action }).await {
+                Ok(response) => Some(computer_response_json(&runtime_id, &response)), Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
+        }
         "remove_machine" | "connect_machine" | "disconnect_machine" | "reconnect_machine"
         | "bootstrap_machine" | "trust_host_key" | "refresh_status" | "list_runtimes"
         | "destroy_runtime" => {
@@ -232,10 +414,10 @@ async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<Str
                 "disconnect_machine" => {
                     manager.disconnect_machine(&machine_id).await.map(|_| None)
                 }
-                "reconnect_machine" => manager
-                    .reconnect_machine(&machine_id)
-                    .await
-                    .map(|survivors| Some(reconnected_json(&machine_id, &survivors))),
+                "reconnect_machine" => match manager.reconnect_machine(&machine_id).await {
+                    Ok(_) => manager.list_runtimes(&machine_id).await.map(|runtimes| Some(runtimes_json(&machine_id, &runtimes))),
+                    Err(error) => Err(error),
+                },
                 "bootstrap_machine" => manager.bootstrap_machine(&machine_id).await.map(|report| {
                     Some(format!(
                         "{{\"event\":\"bootstrap_finished\",\"machine_id\":\"{}\",\"report\":{}}}",
@@ -255,11 +437,11 @@ async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<Str
                         .get_machine(&machine_id)
                         .map(|machine| machine.status)
                         .unwrap_or(MachineStatus::Disconnected);
-                    Some(format!(
+                    Ok(Some(format!(
                         "{{\"event\":\"machine_status\",\"machine_id\":\"{}\",\"status\":\"{}\",\"detail\":null}}",
                         machine_id.as_str(),
                         status.as_str()
-                    ))
+                    )))
                 }
                 "list_runtimes" => manager
                     .list_runtimes(&machine_id)
@@ -288,6 +470,99 @@ async fn handle_command(manager: &Arc<MachineManager>, line: &str) -> Option<Str
         "shutdown" => Some("__shutdown__".to_string()),
         other => Some(error_json(other, "unknown command")),
     }
+}
+
+fn browser_action_from_json(value: &serde_json::Value) -> Option<spark_transport::BrowserAction> {
+    let kind = value.get("action")?.as_str()?;
+    match kind {
+        "open" => Some(spark_transport::BrowserAction::Open { url: value.get("url")?.as_str()?.to_string() }),
+        "snapshot" => Some(spark_transport::BrowserAction::Snapshot),
+        "click" => Some(spark_transport::BrowserAction::Click { reference: value.get("ref")?.as_str()?.to_string() }),
+        "fill" => Some(spark_transport::BrowserAction::Fill { reference: value.get("ref")?.as_str()?.to_string(), text: value.get("text")?.as_str()?.to_string() }),
+        "press" => Some(spark_transport::BrowserAction::Press { key: value.get("key")?.as_str()?.to_string() }),
+        "screenshot" => Some(spark_transport::BrowserAction::Screenshot { format: value.get("format").and_then(|v| v.as_str()).unwrap_or("png").into(), quality: value.get("quality").and_then(|v| v.as_u64()).unwrap_or(85) as u8 }),
+        "tabs" => Some(spark_transport::BrowserAction::Tabs),
+        "close" => Some(spark_transport::BrowserAction::Close),
+        _ => None,
+    }
+}
+
+fn computer_action_from_json(value: &serde_json::Value) -> Option<spark_transport::ComputerAction> {
+    let kind = value.get("action")?.as_str()?;
+    let number = |key: &str| value.get(key).and_then(|v| v.as_i64()).map(|v| v as i32);
+    match kind {
+        "screenshot" => Some(spark_transport::ComputerAction::Screenshot),
+        "click" => Some(spark_transport::ComputerAction::Click { x: number("x")?, y: number("y")?, button: value.get("button").and_then(|v| v.as_str()).unwrap_or("left").into() }),
+        "type" => Some(spark_transport::ComputerAction::Type { text: value.get("text")?.as_str()?.into() }),
+        "move" => Some(spark_transport::ComputerAction::Move { x: number("x")?, y: number("y")? }),
+        "key" => Some(spark_transport::ComputerAction::Key { key: value.get("key")?.as_str()?.into() }),
+        "scroll" => Some(spark_transport::ComputerAction::Scroll { x: number("x")?, y: number("y")?, delta: number("delta")? }),
+        _ => None,
+    }
+}
+
+fn browser_response_json(runtime_id: &str, response: &spark_transport::BrowserResponse) -> String {
+    if let Some(error) = &response.error {
+        return format!("{{\"event\":\"error\",\"message\":\"{}\"}}", escape(error));
+    }
+    if let Some(frame) = &response.frame {
+        return format!(
+            "{{\"event\":\"browser_frame\",\"runtime_id\":\"{}\",\"frame_id\":{},\"width\":{},\"height\":{},\"format\":\"{}\",\"data\":\"{}\"}}",
+            escape(runtime_id),
+            frame.frame_id,
+            frame.width,
+            frame.height,
+            escape(&frame.format),
+            base64_encode(&frame.data),
+        );
+    }
+    let snapshot = response
+        .snapshot
+        .as_deref()
+        .map(|v| format!("\"snapshot\":\"{}\"", escape(v)))
+        .unwrap_or_else(|| "\"snapshot\":null".into());
+    format!("{{\"event\":\"browser_result\",{} }}", snapshot)
+}
+
+fn computer_response_json(runtime_id: &str, response: &spark_transport::ComputerResponse) -> String {
+    if let Some(error) = &response.error {
+        return format!("{{\"event\":\"error\",\"message\":\"{}\"}}", escape(error));
+    }
+    if let Some(frame) = &response.frame {
+        return format!(
+            "{{\"event\":\"computer_frame\",\"runtime_id\":\"{}\",\"frame_id\":{},\"width\":{},\"height\":{},\"format\":\"{}\",\"data\":\"{}\"}}",
+            escape(runtime_id),
+            frame.frame_id,
+            frame.width,
+            frame.height,
+            escape(&frame.format),
+            base64_encode(&frame.data),
+        );
+    }
+    "{\"event\":\"computer_result\"}".to_string()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0] as u32;
+        let b = chunk.get(1).copied().unwrap_or(0) as u32;
+        let c = chunk.get(2).copied().unwrap_or(0) as u32;
+        output.push(TABLE[(a >> 2) as usize] as char);
+        output.push(TABLE[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b & 15) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(c & 63) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 // ---------------------------------------------------------------------------
@@ -349,15 +624,6 @@ fn runtimes_json(machine_id: &MachineId, runtimes: &[RuntimeInfo]) -> String {
 
 /// After a reconnect the client needs two things: "your work is still there"
 /// and the ids it must re-attach to.
-fn reconnected_json(machine_id: &MachineId, survivors: &[String]) -> String {
-    let payload = serde_json::to_string(survivors).unwrap_or_else(|_| "[]".to_string());
-    format!(
-        "{{\"event\":\"reconnected\",\"machine_id\":\"{}\",\"runtimes\":{}}}",
-        machine_id.as_str(),
-        payload
-    )
-}
-
 fn ok_json(cmd: &str) -> String {
     format!("{{\"event\":\"ok\",\"cmd\":\"{}\"}}", escape(cmd))
 }

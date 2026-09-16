@@ -36,6 +36,7 @@ use gpui::{
 };
 use crate::machine::MachinePanel;
 use crate::stores::{AttentionStore, AttentionSnapshot, MachineStore};
+use spark_transport::TransportCommand;
 
 pub struct AttentionOverlay {
     attention: Entity<AttentionStore>,
@@ -43,6 +44,7 @@ pub struct AttentionOverlay {
     /// It takes precedence: a machine that is not trusted cannot run anything,
     /// so the user must answer this card first.
     machines: Option<Entity<MachineStore>>,
+    command_tx: Option<tokio::sync::mpsc::UnboundedSender<TransportCommand>>,
 }
 
 impl AttentionOverlay {
@@ -51,6 +53,7 @@ impl AttentionOverlay {
         Self {
             attention,
             machines: None,
+            command_tx: None,
         }
     }
 
@@ -58,11 +61,13 @@ impl AttentionOverlay {
     pub fn with_machines(
         attention: Entity<AttentionStore>,
         machines: Entity<MachineStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<TransportCommand>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&machines, |_, _, cx| cx.notify()).detach();
         let mut overlay = Self::new(attention, cx);
         overlay.machines = Some(machines);
+        overlay.command_tx = Some(command_tx);
         overlay
     }
 }
@@ -83,7 +88,11 @@ impl Render for AttentionOverlay {
                 .items_center()
                 .justify_center()
                 .bg(gpui::rgba(0x00000080))
-                .child(MachinePanel::render_host_key_attention(attention));
+                .child(MachinePanel::render_host_key_attention(
+                    attention,
+                    self.machines.clone().expect("machine entity"),
+                    self.command_tx.clone().expect("machine command channel"),
+                ));
         }
 
         let attention = self.attention.read(cx);

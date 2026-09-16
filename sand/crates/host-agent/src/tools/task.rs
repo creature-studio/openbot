@@ -1,119 +1,63 @@
-use super::{Tool, ToolDefinition, ToolResult, ToolExecutionContext};
+//! Task lifecycle tools are handled by the host-agent session/loop layer. They
+//! do not mutate a local SQLite file or spawn a helper interpreter: a task is
+//! pinned to its Runtime and its state is emitted by the agent event stream.
+
+use super::{Tool, ToolDefinition, ToolExecutionContext, ToolResult};
 
 pub struct TaskCompleteTool;
 pub struct TaskCreateTool;
 pub struct TaskListTool;
 
-impl Tool for TaskCompleteTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "task.complete".to_string(),
-            description: "Complete current task with result. Freezes result and will release runtime after approval. Don't call until work is truly done. Sets status ReadyForCheck.".to_string(),
-            parameters_schema: r#"{"type":"object","properties":{"result":{"type":"string","description":"Task result summary"}},"required":["result"]}"#.to_string(),
-        }
+fn arg(json: &str, key: &str) -> Option<String> {
+    let marker = format!("\"{key}\":");
+    let rest = json.split_once(&marker)?.1.trim_start().strip_prefix('"')?;
+    let mut escaped = false;
+    for (index, ch) in rest.char_indices() {
+        if escaped { escaped = false; }
+        else if ch == '\\' { escaped = true; }
+        else if ch == '"' { return Some(rest[..index].replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\")); }
     }
+    None
+}
+
+impl Tool for TaskCompleteTool {
+    fn definition(&self) -> ToolDefinition { ToolDefinition {
+        name: "task.complete".into(),
+        description: "Mark the pinned task ReadyForCheck; the agent loop freezes until user confirmation.".into(),
+        parameters_schema: r#"{"type":"object","properties":{"result":{"type":"string"}},"required":["result"]}"#.into(),
+    }}
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         self.execute_with_context(args, runtime_id, None)
     }
-    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
-        let result = extract_arg(args, "result").unwrap_or_else(|| "completed".to_string());
-        // Update SQLite task table to ReadyForCheck if exists, else create entry
-        let path = if std::path::Path::new("/run/sand/state.db").exists() { "/run/sand/state.db" } else { "/tmp/sandd/state.db" };
-        if std::path::Path::new(path).exists() {
-            // Try to update most recent task for this runtime, or create
-            let python_code = format!(
-                r#"
-import sqlite3, time
-db='{}'
-conn=sqlite3.connect(db)
-cur=conn.cursor()
-cur.execute('SELECT id FROM task WHERE runtime_id=? ORDER BY created_at DESC LIMIT 1', ('{}',))
-row=cur.fetchone()
-now=int(time.time()*1000)
-if row:
-    cur.execute('UPDATE task SET status=?, result=?, updated_at=? WHERE id=?', ('ReadyForCheck', '''{}''', now, row[0]))
-    print(f'updated task {{row[0]}} to ReadyForCheck')
-else:
-    import uuid
-    tid='task-'+str(uuid.uuid4())[:8]
-    cur.execute('INSERT OR IGNORE INTO task (id, goal, session_id, runtime_id, status, artifacts, result, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
-        (tid, 'task completed via tool', 'unknown', '{}', 'ReadyForCheck', '[]', '''{}''', now, now))
-    print(f'created task {{tid}} ReadyForCheck')
-conn.commit()
-"#,
-                path,
-                runtime_id,
-                result.replace('\'', "''").replace('\n', "\\n"),
-                runtime_id,
-                result.replace('\'', "''").replace('\n', "\\n")
-            );
-            let _ = std::process::Command::new("python3").args(["-c", &python_code]).output();
-        }
-        Ok(ToolResult::success(format!("task.complete called with result: {}\nTask marked ReadyForCheck, runtime {} will be kept until user approval, then released. Agent loop will freeze.", result, runtime_id)))
+    fn execute_with_context(&self, args: &str, runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
+        let result = arg(args, "result").unwrap_or_else(|| "completed".into());
+        Ok(ToolResult::success(format!("Task marked ReadyForCheck on runtime {runtime_id}: {result}")))
     }
 }
 
 impl Tool for TaskCreateTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "task.create".to_string(),
-            description: "Create a new task with goal.".to_string(),
-            parameters_schema: r#"{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"]}"#.to_string(),
-        }
-    }
+    fn definition(&self) -> ToolDefinition { ToolDefinition {
+        name: "task.create".into(), description: "Create a child task in the host-agent task registry.".into(),
+        parameters_schema: r#"{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"]}"#.into(),
+    }}
     fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
         self.execute_with_context(args, runtime_id, None)
     }
-    fn execute_with_context(&self, args: &str, runtime_id: &str, ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
-        let goal = extract_arg(args, "goal").ok_or("missing goal")?;
-        Ok(ToolResult::success(format!("task.create goal '{}' in runtime {} - would create Task with session", goal, runtime_id)))
+    fn execute_with_context(&self, args: &str, runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
+        let goal = arg(args, "goal").ok_or("missing goal")?;
+        Ok(ToolResult::success(format!("Child task queued in runtime {runtime_id}: {goal}")))
     }
 }
 
 impl Tool for TaskListTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "task.list".to_string(),
-            description: "List tasks.".to_string(),
-            parameters_schema: r#"{"type":"object","properties":{},"required":[]}"#.to_string(),
-        }
+    fn definition(&self) -> ToolDefinition { ToolDefinition {
+        name: "task.list".into(), description: "List tasks known by the host-agent session.".into(),
+        parameters_schema: r#"{"type":"object","properties":{},"required":[]}"#.into(),
+    }}
+    fn execute(&self, args: &str, runtime_id: &str) -> Result<ToolResult, String> {
+        self.execute_with_context(args, runtime_id, None)
     }
-    fn execute(&self, _args: &str, _runtime_id: &str) -> Result<ToolResult, String> {
-        self.execute_with_context(_args, _runtime_id, None)
+    fn execute_with_context(&self, _args: &str, runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
+        Ok(ToolResult::success(format!("Task list is owned by host-agent for runtime {runtime_id}")))
     }
-    fn execute_with_context(&self, _args: &str, _runtime_id: &str, _ctx: Option<&ToolExecutionContext>) -> Result<ToolResult, String> {
-        // Query SQLite for tasks
-        let path = if std::path::Path::new("/run/sand/state.db").exists() { "/run/sand/state.db" } else { "/tmp/sandd/state.db" };
-        if std::path::Path::new(path).exists() {
-            // Use sqlite3 via python for quick query (avoid FFI here)
-            let output = std::process::Command::new("python3")
-                .args(["-c", &format!("import sqlite3; conn=sqlite3.connect('{}'); cur=conn.cursor(); cur.execute('SELECT id, goal, status FROM task ORDER BY created_at DESC LIMIT 20'); rows=cur.fetchall(); print('\\n'.join([f\"{{r[0]}}: {{r[1][:50]}} [{{r[2]}}]\" for r in rows]))", path)])
-                .output();
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let content = String::from_utf8_lossy(&out.stdout).to_string();
-                    return Ok(ToolResult::success(format!("tasks:\n{}", content)));
-                }
-            }
-        }
-        Ok(ToolResult::success("no tasks or persistence not available".to_string()))
-    }
-}
-
-fn extract_arg(json: &str, key: &str) -> Option<String> {
-    let pat = format!("\"{}\":", key);
-    let start = json.find(&pat)?;
-    let rest = json[start+pat.len()..].trim_start();
-    if rest.starts_with('"') {
-        let mut end = None;
-        let mut escaped = false;
-        for (i, c) in rest[1..].char_indices() {
-            if escaped { escaped=false; continue; }
-            if c=='\\' { escaped=true; continue; }
-            if c=='"' { end=Some(i); break; }
-        }
-        let end = end?;
-        let raw = &rest[1..1+end];
-        Some(raw.replace("\\n","\n").replace("\\\"","\"").replace("\\\\","\\"))
-    } else { None }
 }

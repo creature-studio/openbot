@@ -588,7 +588,7 @@ impl SshTransport {
         // The remote hash is the contract: if it does not match, bootstrap stops
         // here rather than executing a truncated binary.
         let (code, stdout, stderr) = self
-            .ssh_exec(&format!("sha256sum {} | cut -d' ' -f1", shell_quote(remote)))
+            .ssh_exec(&format!("sha256sum {} | cut -d' ' -f1", remote_shell_path(remote)))
             .await?;
         if code != 0 {
             bail!("remote sha256 check failed: {}", stderr.trim());
@@ -1233,7 +1233,7 @@ impl RuntimeTransport for SshTransport {
         // Preferred path: `cat` over a one-shot ssh, because artifacts may live
         // outside any runtime workspace (where FsRead's sandbox does not apply).
         let (code, stdout, stderr) = self
-            .ssh_exec(&format!("cat -- {}", shell_quote(&request.remote_path)))
+            .ssh_exec(&format!("cat -- {}", remote_shell_path(&request.remote_path)))
             .await?;
         if code != 0 {
             bail!("download failed: {}", stderr.trim());
@@ -1306,6 +1306,16 @@ fn runtime_info(json: &str, fallback_machine: &MachineId) -> RuntimeInfo {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn remote_shell_path(value: &str) -> String {
+    if let Some(suffix) = value.strip_prefix("~/") {
+        format!("\"$HOME/{suffix}\"")
+    } else if value == "~" {
+        "\"$HOME\"".to_string()
+    } else {
+        shell_quote(value)
+    }
 }
 
 impl Drop for SshTransport {

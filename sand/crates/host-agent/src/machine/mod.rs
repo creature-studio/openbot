@@ -159,6 +159,9 @@ pub struct MachineManager {
     /// through [`MachineManager::trust_host_key`] consumes one, so a fingerprint
     /// can never be trusted as a side effect of some other call.
     pending_host_keys: RwLock<HashMap<MachineId, spark_transport::HostKeyIssue>>,
+    /// Runtime ownership is durable routing state: every tool call resolves
+    /// runtime_id -> machine_id before touching a transport.
+    runtime_machines: RwLock<HashMap<String, MachineId>>,
 }
 
 impl MachineManager {
@@ -171,6 +174,7 @@ impl MachineManager {
             listeners: RwLock::new(Vec::new()),
             running: RwLock::new(false),
             pending_host_keys: RwLock::new(HashMap::new()),
+            runtime_machines: RwLock::new(HashMap::new()),
         };
         manager.register(Machine::local(Some("Local".to_string())));
         manager
@@ -185,6 +189,7 @@ impl MachineManager {
             listeners: RwLock::new(Vec::new()),
             running: RwLock::new(false),
             pending_host_keys: RwLock::new(HashMap::new()),
+            runtime_machines: RwLock::new(HashMap::new()),
         };
         manager.register(Machine::local(Some("Local".to_string())));
 
@@ -253,12 +258,18 @@ impl MachineManager {
     /// Remove a machine, disconnecting first. Never touches remote runtimes of
     /// *other* machines.
     pub async fn remove_machine(&self, machine_id: &MachineId) -> Result<()> {
+        if machine_id.is_local() {
+            bail!("the local machine is permanent");
+        }
         let handle = self.take_handle(machine_id)?;
         if handle.transport.is_connected() {
             let _ = handle.transport.disconnect().await;
         }
         if let Some(persistence) = &self.persistence {
             let _ = persistence.delete_machine(machine_id.as_str());
+        }
+        if let Ok(mut runtimes) = self.runtime_machines.write() {
+            runtimes.retain(|_, owner| owner != machine_id);
         }
         self.emit(MachineEvent::Removed(machine_id.clone()));
         Ok(())
@@ -324,19 +335,34 @@ impl MachineManager {
             .map(|handle| handle.transport.clone())
     }
 
+    /// Synchronous ownership lookup used by the synchronous ToolRegistry.
+    pub fn runtime_machine_id(&self, runtime_id: &str) -> Option<MachineId> {
+        self.runtime_machines.read().ok()?.get(runtime_id).cloned()
+    }
+
+    fn remember_runtime(&self, runtime_id: impl Into<String>, machine_id: &MachineId) {
+        if let Ok(mut runtimes) = self.runtime_machines.write() {
+            runtimes.insert(runtime_id.into(), machine_id.clone());
+        }
+    }
+
     /// The transport a runtime belongs to, checking the runtime's own record
     /// when the caller only has a runtime id.
     pub async fn transport_for_runtime(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
+        if let Some(machine_id) = self.runtime_machine_id(runtime_id) {
+            return self.transport(&machine_id);
+        }
         for handle in self.handles() {
             if let Ok(info) = handle.transport.get_runtime(runtime_id).await {
                 if info.id == runtime_id {
+                    self.remember_runtime(runtime_id.to_string(), &handle.id());
                     return Some(handle.transport.clone());
                 }
             }
         }
-        // Fall back to the local machine: a runtime created before machine
-        // support existed lives there.
-        self.transport(&MachineId::local())
+        // A legacy runtime is only safe to assume local when it was explicitly
+        // discovered on the local transport.
+        None
     }
 
     /// Snapshot of every machine as cheap clones.
@@ -406,6 +432,17 @@ impl MachineManager {
                     let latency = ssh.ping().await.ok();
                     self.apply_handshake(machine_id, Some(handshake), latency);
                     Ok(())
+                }
+                Err(ConnectError::Bootstrap(_)) => {
+                    // A missing/incompatible remote daemon is the one safe
+                    // automatic recovery: bootstrap the user-owned binary, then
+                    // establish the same long-lived bridge. Host-key and auth
+                    // failures never enter this branch.
+                    match self.bootstrap_machine(machine_id).await {
+                        Ok(_) if snapshot.transport.is_connected() => Ok(()),
+                        Ok(_) => Err(anyhow!("bootstrap completed but the sandd bridge did not connect")),
+                        Err(error) => Err(error),
+                    }
                 }
                 Err(error) => {
                     self.record_connect_error(machine_id, &error);
@@ -519,7 +556,7 @@ impl MachineManager {
                     Ok(handshake) => {
                         let latency = ssh.ping().await.ok();
                         self.apply_handshake(machine_id, Some(handshake), latency);
-                        return Ok(self.attach_after_reconnect(&transport).await);
+                        return Ok(self.attach_after_reconnect(machine_id, &transport).await);
                     }
                     Err(error) => {
                         spark_transport::reconnect::plan(
@@ -535,7 +572,7 @@ impl MachineManager {
                         let handshake = transport.handshake().await.ok();
                         let latency = transport.ping().await.ok();
                         self.apply_handshake(machine_id, handshake, latency);
-                        return Ok(self.attach_after_reconnect(&transport).await);
+                        return Ok(self.attach_after_reconnect(machine_id, &transport).await);
                     }
                     Err(e) => {
                         let error = ConnectError::Unreachable(e.to_string());
@@ -592,10 +629,16 @@ impl MachineManager {
     ///
     /// This is the recovery half of "disconnect ≠ destroy": the machine is
     /// reachable again, and the work that was running is still there.
-    async fn attach_after_reconnect(&self, transport: &Arc<dyn RuntimeTransport>) -> Vec<String> {
+    async fn attach_after_reconnect(&self, machine_id: &MachineId, transport: &Arc<dyn RuntimeTransport>) -> Vec<String> {
         match transport.list_runtimes().await {
             Ok(runtimes) => {
-                let ids: Vec<String> = runtimes.into_iter().map(|r| r.id).collect();
+                let ids: Vec<String> = runtimes
+                    .into_iter()
+                    .map(|r| {
+                        self.remember_runtime(r.id.clone(), machine_id);
+                        r.id
+                    })
+                    .collect();
                 tracing::info!("reconnected: {} runtime(s) still alive", ids.len());
                 ids
             }
@@ -618,9 +661,13 @@ impl MachineManager {
             .ok_or_else(|| anyhow!("bootstrap is only meaningful for SSH machines"))?;
 
         self.set_status(machine_id.clone(), MachineStatus::Bootstrapping, None);
-        let report = spark_transport::ssh::bootstrap::bootstrap(&transport)
-            .await
-            .map_err(anyhow::Error::from)?;
+        let report = match spark_transport::ssh::bootstrap::bootstrap(&transport).await {
+            Ok(report) => report,
+            Err(error) => {
+                self.set_status(machine_id.clone(), MachineStatus::Error, Some(error.to_string()));
+                return Err(anyhow::Error::from(error));
+            }
+        };
         // Bootstrap only installs and starts sandd; the bridge is (re)started
         // by the connect that follows, so do it here and handshake for real.
         if let Ok(handshake) = transport.connect_machine(false).await {
@@ -703,7 +750,9 @@ impl MachineManager {
                 continue;
             }
             // Best effort: a machine that is down must not stop host-agent.
-            let _ = self.connect_machine(&machine.id).await;
+            if self.connect_machine(&machine.id).await.is_ok() {
+                let _ = self.list_runtimes(&machine.id).await;
+            }
         }
     }
 
@@ -727,22 +776,124 @@ impl MachineManager {
         };
         let request = spark_transport::CreateRuntimeRequest::new(kind, workspace)
             .on_machine(machine_id.clone());
-        transport.create_runtime(request).await
+        let runtime = transport.create_runtime(request).await?;
+        self.remember_runtime(runtime.id.clone(), machine_id);
+        Ok(runtime)
+    }
+
+    /// Persist the session's machine pin and message checkpoint. OpenSSH
+    /// credentials are deliberately absent from this record.
+    pub fn persist_session(&self, session: &crate::agent::session::AgentSession) {
+        let Some(persistence) = &self.persistence else { return; };
+        let messages = serde_json::to_string(&session.messages).unwrap_or_else(|_| "[]".to_string());
+        let _ = persistence.save_session(
+            &session.id,
+            &session.runtime_id,
+            session.machine_id().as_str(),
+            &session.model,
+            session.status.as_str(),
+            session.goal.as_deref(),
+            &session.cwd,
+            session.created_at,
+            session.updated_at,
+            &messages,
+        );
+    }
+
+    /// Persist the task's machine pin and lifecycle record. Secrets are not
+    /// part of `Task`, and the persistence layer stores only the runtime and
+    /// machine coordinates needed for recovery.
+    pub fn persist_task(&self, task: &crate::agent::task::Task, machine_id: &MachineId) {
+        let Some(persistence) = &self.persistence else { return; };
+        let status = match &task.status {
+            crate::agent::state::TaskStatus::Pending => "pending",
+            crate::agent::state::TaskStatus::Running => "running",
+            crate::agent::state::TaskStatus::WaitingApproval => "waiting_approval",
+            crate::agent::state::TaskStatus::Completed => "completed",
+            crate::agent::state::TaskStatus::Failed => "failed",
+            crate::agent::state::TaskStatus::Cancelled => "cancelled",
+        };
+        let artifacts = serde_json::to_string(&task.artifacts).unwrap_or_else(|_| "[]".to_string());
+        let _ = persistence.save_task(
+            &task.id,
+            &task.goal,
+            &task.session_id,
+            &task.runtime_id,
+            machine_id.as_str(),
+            status,
+            &artifacts,
+            task.result.as_deref(),
+            task.created_at,
+            task.updated_at,
+        );
     }
 
     /// Destroy a runtime (**only** the runtime — never the machine's sandd).
     pub async fn destroy_runtime(&self, machine_id: &MachineId, runtime_id: &str) -> Result<()> {
+        if let Some(owner) = self.runtime_machine_id(runtime_id) {
+            if &owner != machine_id {
+                bail!("runtime {runtime_id} belongs to machine {owner}, not {machine_id}");
+            }
+        }
         let transport = self
             .transport(machine_id)
             .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
-        transport.destroy_runtime(runtime_id).await
+        transport.destroy_runtime(runtime_id).await?;
+        if let Ok(mut runtimes) = self.runtime_machines.write() {
+            runtimes.remove(runtime_id);
+        }
+        Ok(())
+    }
+
+    pub async fn open_pty(&self, runtime_id: &str, request: spark_transport::PtyOpenRequest) -> Result<()> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.open_pty(request).await
+    }
+
+    pub async fn write_pty(&self, runtime_id: &str, request: spark_transport::PtyWriteRequest) -> Result<()> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.write_pty(request).await
+    }
+
+    pub async fn resize_pty(&self, runtime_id: &str, request: spark_transport::PtyResizeRequest) -> Result<()> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.resize_pty(request).await
+    }
+
+    pub async fn read_pty(&self, runtime_id: &str, request: spark_transport::PtyReadRequest) -> Result<spark_transport::PtyReadResponse> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.read_pty(request).await
+    }
+
+    pub async fn signal_pty(&self, runtime_id: &str, request: spark_transport::PtySignalRequest) -> Result<()> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.signal_pty(request).await
+    }
+
+    pub async fn close_pty(&self, runtime_id: &str, pty_id: &str) -> Result<()> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.close_pty(runtime_id, pty_id).await
+    }
+
+    pub async fn browser_request(&self, runtime_id: &str, request: spark_transport::BrowserRequest) -> Result<spark_transport::BrowserResponse> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.browser_request(request).await
+    }
+
+    pub async fn computer_request(&self, runtime_id: &str, request: spark_transport::ComputerRequest) -> Result<spark_transport::ComputerResponse> {
+        let transport = self.transport_for_runtime(runtime_id).await.ok_or_else(|| anyhow!("runtime is not mapped to a connected machine: {runtime_id}"))?;
+        transport.computer_request(request).await
     }
 
     pub async fn list_runtimes(&self, machine_id: &MachineId) -> Result<Vec<spark_transport::RuntimeInfo>> {
         let transport = self
             .transport(machine_id)
             .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
-        transport.list_runtimes().await
+        let runtimes = transport.list_runtimes().await?;
+        for runtime in &runtimes {
+            self.remember_runtime(runtime.id.clone(), machine_id);
+        }
+        Ok(runtimes)
     }
 
     // -----------------------------------------------------------------------
