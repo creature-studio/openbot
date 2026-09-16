@@ -418,6 +418,7 @@ impl Render for RootView {
             ConnectionStatus::Error { .. } => ("Connection error", gpui::rgb(0xf87171)),
             ConnectionStatus::Disconnected => ("Offline", gpui::rgb(0x94a3b8)),
         };
+        let reconnect_tx = command_tx.clone();
 
         div()
             .flex()
@@ -472,6 +473,12 @@ impl Render for RootView {
                             .bg(gpui::rgb(0x111c32))
                             .border_1()
                             .border_color(gpui::rgb(0x24324a))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(gpui::rgb(0x172554)))
+                            .id("connection-status")
+                            .on_click(move |_, _, _| {
+                                let _ = reconnect_tx.send(TransportCommand::Connect);
+                            })
                             .child(div().text_xs().text_color(connection_color).child("●"))
                             .child(div().text_xs().text_color(gpui::rgb(0x94a3b8)).child(connection_label)),
                     ),

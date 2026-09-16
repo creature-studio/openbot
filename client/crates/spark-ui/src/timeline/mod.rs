@@ -82,11 +82,20 @@ impl Render for TaskTimeline {
         let Some(task) = selected else {
             return div()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
+                .gap_2()
                 .h_full()
-                .text_color(gpui::rgb(0x6b7280))
-                .child("Select a task to view timeline").into_any_element();
+                .text_color(gpui::rgb(0x94a3b8))
+                .child(div().text_lg().child("No tasks yet"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(gpui::rgb(0x64748b))
+                        .child("在下方输入目标，按 Enter 或点击 Send 开始"),
+                )
+                .into_any_element();
         };
 
         // Goal header

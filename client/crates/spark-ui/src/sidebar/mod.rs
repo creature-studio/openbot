@@ -124,6 +124,28 @@ impl Sidebar {
                     .child(SharedString::from(format!("● {}", bot.name))),
             );
         }
+
+        let create_bot_store = self.bots.clone();
+        list = list.child(
+            div()
+                .mt_1()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(gpui::rgb(0x24324a))
+                .text_xs()
+                .text_color(gpui::rgb(0x60a5fa))
+                .cursor_pointer()
+                .hover(|d| d.bg(gpui::rgb(0x172554)))
+                .id("create-bot")
+                .on_click(move |_, _, cx| {
+                    create_bot_store.update(cx, |bots, cx| {
+                        bots.create_default(cx);
+                    });
+                })
+                .child("+ New bot"),
+        );
         Self::section("BOT", list)
     }
 
@@ -164,6 +186,16 @@ impl Sidebar {
                 );
             }
         }
+        if tasks.order.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(gpui::rgb(0x64748b))
+                    .child("输入目标后点击 Send"),
+            );
+        }
         Self::section("TASKS", list)
     }
 
@@ -196,6 +228,16 @@ impl Sidebar {
                         workbench.name,
                         workbench.machine_id.as_str()
                     ))),
+            );
+        }
+        if workbenches.workbenches.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(gpui::rgb(0x64748b))
+                    .child("任务创建后显示项目工作区"),
             );
         }
         Self::section("WORKBENCH", list)
