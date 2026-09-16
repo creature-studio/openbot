@@ -255,13 +255,15 @@ sand/test_remote_ssh.sh
 
 **尚未完成的验证**：以上 2)–4) 都需要在真实机器/工具链上执行；本仓库当前只完成了实现与静态自检。第一次跑 `test_remote_ssh.sh` 会在未知主机密钥处停下并打印指纹 —— 那是设计行为，确认一次即可继续。
 
-## 13. 当前验证记录（2026-09-16 UTC）
+## 13. 当前验证记录（2026-09-16，Asia/Shanghai）
 
 | 检查 | 结果 | 证据 |
 |---|---|---|
-| `sand/check_spark.sh` | 通过 | 静态安全、24-byte framing、UDS、transport、machine routing、reconnect、host-key、persistence、GPUI surface invariants 全部通过 |
-| Rust workspace build/test | 未执行 | 当前运行环境没有 `cargo`、`rustc` 或 `rustup` |
-| `sand/test_remote_ssh.sh` | 阻塞，未进入 SSH | 脚本在 preconditions 处退出：未设置 `SPARK_SSH_HOST`；因此没有伪造 bootstrap/runtime/exec/PTY/FS/browser/disconnect/reconnect/destroy 结果 |
+| `git diff --check` | 通过 | 当前工作区无 whitespace error |
+| `bash sand/check_spark.sh --full` | 通过 | 静态安全、24-byte framing、UDS、transport、machine routing、reconnect、host-key、persistence、GPUI surface invariants 全部通过 |
+| Rust workspace build/test | 未执行 | 当前运行环境没有 `cargo`、`rustc` 或 `rustup`；新增 host-agent worker、client reconnect 与 GPUI image 代码必须在有工具链环境复核 |
+| `sand/test_full.sh` | 未执行测试，失败 | `sand/target/debug/sand` 不存在；不能把缺少构建产物当作本地 E2E 通过 |
+| `sand/test_remote_ssh.sh` | 阻塞，未进入 SSH | 本次实际运行结果为 `SPARK_SSH_HOST is required`；没有伪造 bootstrap/runtime/exec/PTY/FS/browser/disconnect/reconnect/destroy 结果 |
 | 真实 SSH Linux E2E | 未完成 | 必须在有 Rust 工具链且可达 Linux SSH 主机的环境重新运行上述脚本；本次不能声称验收完成 |
 
 ## 14. 已知限制
@@ -270,4 +272,4 @@ sand/test_remote_ssh.sh
 * bootstrap 只支持 `linux-x86_64` / `linux-aarch64`。
 * `computer.*` 在 `capabilities.desktop == false` 的机器上被禁用（Sandbox/无 Xvfb）。
 * 浏览器预览是截图流（丢旧帧），不是 VNC/嵌入式 WebView。
-* `host-agent serve` 与 GPUI 现在在同一 newline-JSON UDS 上覆盖 machine、runtime、task/session 状态、PTY、browser、computer 命令；实际 AgentLoop/模型执行仍由 host-agent 的 session runner 接管，serve 的 task 命令只负责创建/持久化 pinned session 与传递消息，不能把它当成已完成的在线模型 E2E。
+* `host-agent serve` 与 GPUI 现在在同一 newline-JSON UDS 上覆盖 machine、runtime、task/session 状态、PTY、browser、computer 命令；任务创建、follow-up 消息排队、取消、permission approve/deny 恢复和 AgentLoop 事件流已接入 host-agent blocking worker，但本轮新增代码尚未在缺少 Rust toolchain 的环境编译，不能把它当成已完成的在线模型/SSH E2E。

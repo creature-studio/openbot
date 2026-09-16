@@ -46,6 +46,7 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -56,8 +57,10 @@ use spark_model::{MachineId, MachineStatus};
 use spark_transport::{BootstrapSummary, RuntimeInfo};
 use spark_transport::MachineDraft;
 
-use crate::agent::{AgentSession, TaskManager};
+use crate::agent::{AgentSession, AgentLoop, TaskManager};
 use crate::machine::{MachineEvent, MachineManager};
+use crate::model::{Model, MockModel, OpenAICompatibleModel};
+use crate::tools::ToolExecutionContext;
 
 /// Where the client socket lives.
 pub fn default_socket_path() -> PathBuf {
@@ -79,11 +82,23 @@ pub fn default_socket_path() -> PathBuf {
 struct ServeState {
     sessions: Mutex<HashMap<String, AgentSession>>,
     tasks: Mutex<TaskManager>,
+    /// One cancellation flag per running task. The flag is shared with the
+    /// blocking AgentLoop and is never used to destroy the runtime.
+    cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Messages submitted while a worker is between model/tool calls. They
+    /// are appended to the durable session and picked up by the next worker
+    /// turn, rather than racing a mutable session clone in another thread.
+    pending_messages: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl ServeState {
     fn new() -> Self {
-        Self { sessions: Mutex::new(HashMap::new()), tasks: Mutex::new(TaskManager::new()) }
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(TaskManager::new()),
+            cancel_flags: Mutex::new(HashMap::new()),
+            pending_messages: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -146,6 +161,7 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
                 // `set_status` inside the manager emits StatusChanged, which the
                 // subscriber above broadcasts — no duplicate event here.
                 let _ = manager.health_check_once().await;
+                manager.schedule_reconnects().await;
             }
         });
     }
@@ -186,7 +202,7 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(reply) = handle_command(&manager, &state, &line).await {
+                if let Some(reply) = handle_command(&manager, &state, &broadcast_tx, &line).await {
                     if reply == "__shutdown__" {
                         let _ = reply_tx.send(
                             "{\"event\":\"ok\",\"cmd\":\"shutdown\"}".to_string(),
@@ -204,7 +220,12 @@ pub async fn serve(manager: Arc<MachineManager>, socket_path: Option<PathBuf>) -
 }
 
 /// Dispatch one command line. Returns the reply line, when there is one.
-async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, line: &str) -> Option<String> {
+async fn handle_command(
+    manager: &Arc<MachineManager>,
+    state: &Arc<ServeState>,
+    broadcast_tx: &tokio::sync::broadcast::Sender<String>,
+    line: &str,
+) -> Option<String> {
     let value: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(e) => {
@@ -283,7 +304,11 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
             let goal = value.get("goal").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             match manager.create_runtime(&machine_id, "assistant", None).await {
                 Ok(runtime) => {
-                    let session = AgentSession::on_machine(machine_id.clone(), runtime.id.clone(), "default".into());
+                    let mut session = AgentSession::on_machine(machine_id.clone(), runtime.id.clone(), "default".into());
+                    session.add_system_message(
+                        "You are a helpful assistant. Use the registered runtime tools for shell, files, terminal, browser, and computer actions. Never assume the runtime is local; all tools are routed by its fixed machine ownership.".into(),
+                    );
+                    session.add_user_message(goal.clone());
                     let session_id = session.id.clone();
                     let created = state.tasks.lock().ok().and_then(|mut tasks| {
                         let task_id = tasks.create(goal.clone(), session.id.clone(), runtime.id.clone());
@@ -292,7 +317,23 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
                     if let Some(task) = created {
                         manager.persist_session(&session);
                         manager.persist_task(&task, &machine_id);
-                        if let Ok(mut sessions) = state.sessions.lock() { sessions.insert(session_id.clone(), session); }
+                        let cancel_flag = Arc::new(AtomicBool::new(false));
+                        if let Ok(mut flags) = state.cancel_flags.lock() {
+                            flags.insert(task.id.clone(), cancel_flag.clone());
+                        }
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            sessions.insert(session_id.clone(), session.clone());
+                        }
+                        spawn_agent_task(
+                            manager.clone(),
+                            state.clone(),
+                            broadcast_tx.clone(),
+                            task.id.clone(),
+                            session_id.clone(),
+                            session,
+                            machine_id.clone(),
+                            cancel_flag,
+                        );
                         Some(format!("{{\"event\":\"task_created\",\"task_id\":\"{}\",\"session_id\":\"{}\",\"machine_id\":\"{}\",\"runtime_id\":\"{}\",\"goal\":\"{}\"}}", escape(&task.id), escape(&session_id), escape(machine_id.as_str()), escape(&runtime.id), escape(&goal)))
                     } else { Some(error_json(&cmd, "task state unavailable")) }
                 }
@@ -302,24 +343,83 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
         "send_task_message" => {
             let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
             let content = value.get("content").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let session_id = state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id).map(|task| task.session_id.clone()));
-            let updated_session = session_id.as_ref().and_then(|id| {
-                state.sessions.lock().ok().and_then(|mut sessions| {
-                    let session = sessions.get_mut(id)?;
-                    session.add_user_message(content);
-                    Some(session.clone())
-                })
-            });
-            match updated_session {
-                Some(session) => {
-                    manager.persist_session(&session);
-                    Some(format!("{{\"event\":\"task_message_accepted\",\"task_id\":\"{}\",\"session_id\":\"{}\"}}", escape(task_id), escape(&session.id)))
+            let task = state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id).cloned());
+            let Some(task) = task else { return Some(error_json(&cmd, "task not found")); };
+
+            // AgentLoop owns a session snapshot while it is running. Queue a
+            // follow-up instead of mutating that snapshot from the socket task;
+            // the worker drains this queue at its checkpoint and starts the next
+            // turn after persisting the current one.
+            let worker_running = state
+                .cancel_flags
+                .lock()
+                .ok()
+                .map(|flags| flags.contains_key(task_id))
+                .unwrap_or(false);
+            let message_id = format!("user-{}-{}", task_id, unix_seconds());
+            if worker_running {
+                if let Ok(mut pending) = state.pending_messages.lock() {
+                    pending.entry(task_id.to_string()).or_default().push(content.clone());
                 }
-                None => Some(error_json(&cmd, "task not found")),
+                let _ = broadcast_tx.send(user_message_json(task_id, &message_id, &content));
+                return Some(format!(
+                    "{{\"event\":\"task_message_accepted\",\"task_id\":\"{}\",\"queued\":true}}",
+                    escape(task_id)
+                ));
             }
+
+            let Some(mut session) = state
+                .sessions
+                .lock()
+                .ok()
+                .and_then(|sessions| sessions.get(&task.session_id).cloned())
+            else {
+                return Some(error_json(&cmd, "session not found"));
+            };
+            session.add_user_message(content.clone());
+            let _ = broadcast_tx.send(user_message_json(task_id, &message_id, &content));
+            if let Ok(mut sessions) = state.sessions.lock() {
+                sessions.insert(session.id.clone(), session.clone());
+            }
+            if let Ok(mut tasks) = state.tasks.lock() {
+                if let Some(task) = tasks.get_mut(task_id) {
+                    task.status = crate::agent::state::TaskStatus::Running;
+                    task.updated_at = unix_seconds();
+                    manager.persist_task(task, &session.machine_id);
+                }
+            }
+            manager.persist_session(&session);
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            if let Ok(mut flags) = state.cancel_flags.lock() {
+                flags.insert(task_id.to_string(), cancel_flag.clone());
+            }
+            let machine_id = session.machine_id.clone();
+            spawn_agent_task(
+                manager.clone(),
+                state.clone(),
+                broadcast_tx.clone(),
+                task_id.to_string(),
+                session.id.clone(),
+                session,
+                machine_id,
+                cancel_flag,
+            );
+            Some(format!(
+                "{{\"event\":\"task_message_accepted\",\"task_id\":\"{}\",\"session_id\":\"{}\",\"queued\":false}}",
+                escape(task_id),
+                escape(&task.session_id.0)
+            ))
         }
         "stop_task" => {
             let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            if let Ok(flags) = state.cancel_flags.lock() {
+                if let Some(flag) = flags.get(task_id) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+            if let Ok(mut pending) = state.pending_messages.lock() {
+                pending.remove(task_id);
+            }
             let result = state.tasks.lock().map_err(|_| "task state unavailable".to_string()).and_then(|mut tasks| {
                 tasks.fail(task_id, "stopped by user".into())?;
                 tasks.get(task_id).cloned().ok_or_else(|| "task not found".to_string())
@@ -335,14 +435,60 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
         }
         "subscribe_browser" | "unsubscribe_browser" => Some(ok_json(&cmd)),
         "approve_permission" | "deny_permission" => {
-            // Permission decisions are host-agent state changes; they never
-            // cause a client-side local execution.
             let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
-            if state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id)).is_none() {
-                Some(error_json(&cmd, "task not found"))
-            } else {
-                Some(format!("{{\"event\":\"{}\",\"task_id\":\"{}\"}}", cmd, escape(task_id)))
+            let permission_id = value.get("permission_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let task = state.tasks.lock().ok().and_then(|tasks| tasks.get(task_id).cloned());
+            let Some(task) = task else { return Some(error_json(&cmd, "task not found")); };
+            if task.status != crate::agent::state::TaskStatus::WaitingApproval {
+                return Some(error_json(&cmd, "task is not waiting for permission"));
             }
+            let session = state
+                .sessions
+                .lock()
+                .ok()
+                .and_then(|sessions| sessions.get(&task.session_id).cloned());
+            let Some(mut session) = session else { return Some(error_json(&cmd, "session not found")); };
+            let allowed = cmd == "approve_permission";
+            let decision_message = if allowed {
+                format!("Permission {permission_id} approved by the user.")
+            } else {
+                format!("Permission {permission_id} denied by the user.")
+            };
+            let decision_message_id = format!("permission-decision-{}", unix_seconds());
+            session.add_user_message(decision_message.clone());
+            let _ = broadcast_tx.send(user_message_json(task_id, &decision_message_id, &decision_message));
+            if let Ok(mut sessions) = state.sessions.lock() {
+                sessions.insert(session.id.clone(), session.clone());
+            }
+            if let Ok(mut tasks) = state.tasks.lock() {
+                if let Some(task) = tasks.get_mut(task_id) {
+                    task.status = crate::agent::state::TaskStatus::Running;
+                    task.updated_at = unix_seconds();
+                    manager.persist_task(task, &session.machine_id);
+                }
+            }
+            manager.persist_session(&session);
+            let cancel_flag = Arc::new(AtomicBool::new(false));
+            if let Ok(mut flags) = state.cancel_flags.lock() {
+                flags.insert(task_id.to_string(), cancel_flag.clone());
+            }
+            let machine_id = session.machine_id.clone();
+            spawn_agent_task(
+                manager.clone(),
+                state.clone(),
+                broadcast_tx.clone(),
+                task_id.to_string(),
+                session.id.clone(),
+                session,
+                machine_id,
+                cancel_flag,
+            );
+            Some(format!(
+                "{{\"event\":\"permission_resolved\",\"task_id\":\"{}\",\"permission_id\":\"{}\",\"allowed\":{}}}",
+                escape(task_id),
+                escape(permission_id),
+                allowed
+            ))
         }
         "confirm_complete" => {
             let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
@@ -468,6 +614,217 @@ async fn handle_command(manager: &Arc<MachineManager>, state: &Arc<ServeState>, 
         }
         "shutdown" => Some("__shutdown__".to_string()),
         other => Some(error_json(other, "unknown command")),
+    }
+}
+
+/// Run one task outside the Tokio worker threads and stream normalized AgentLoop
+/// events to every connected client. The runtime is deliberately not owned by
+/// this worker: cancellation only flips the loop flag, while runtime destroy
+/// remains an explicit ConfirmComplete operation.
+fn spawn_agent_task(
+    manager: Arc<MachineManager>,
+    state: Arc<ServeState>,
+    broadcast_tx: tokio::sync::broadcast::Sender<String>,
+    task_id: String,
+    session_id: String,
+    mut session: AgentSession,
+    machine_id: MachineId,
+    cancel_flag: Arc<AtomicBool>,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let manager_for_transport = manager.clone();
+        let manager_for_machine = manager.clone();
+        let manager_for_list = manager.clone();
+        let manager_for_runtime = manager.clone();
+        let ctx = ToolExecutionContext::with_runtime_machine(
+            Arc::new(move |machine_id| manager_for_transport.transport(machine_id)),
+            Arc::new(move |machine_id| manager_for_machine.get_machine(machine_id)),
+            Arc::new(move || manager_for_list.list_machines()),
+            machine_id.clone(),
+            Arc::new(move |runtime_id| manager_for_runtime.runtime_machine_id(runtime_id)),
+        );
+        let tools = crate::default_tool_registry();
+        let model: Box<dyn Model> = match OpenAICompatibleModel::from_env() {
+            Ok(model) => Box::new(model),
+            Err(_) => Box::new(MockModel::simple_final(
+                "No model API was configured. The runtime and task are ready; configure OPENAI_API_KEY and send the task again.",
+            )),
+        };
+
+        let _ = broadcast_tx.send(task_status_json(&task_id, "running"));
+        let agent_loop = AgentLoop::new();
+        let result = agent_loop.run_with_cancel(
+            &mut session,
+            model.as_ref(),
+            &tools,
+            Some(&ctx),
+            cancel_flag,
+            |event| {
+                if let Some(line) = loop_event_json(&task_id, &event) {
+                    let _ = broadcast_tx.send(line);
+                }
+            },
+        );
+
+        let was_cancelled = matches!(result.as_ref(), Err(error) if error == "cancelled");
+        let status = if was_cancelled {
+            "cancelled"
+        } else if result.is_err() {
+            "failed"
+        } else {
+            match session.status.as_str() {
+                "ready_for_check" => "ready_for_check",
+                "waiting_input" => "waiting_approval",
+                "completed" => "completed",
+                "failed" => "failed",
+                _ => "running",
+            }
+        };
+
+        let follow_up = if !was_cancelled {
+            state
+                .pending_messages
+                .lock()
+                .ok()
+                .and_then(|mut pending| pending.remove(&task_id))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if !follow_up.is_empty() {
+            for content in follow_up {
+                session.add_user_message(content);
+            }
+            if let Ok(mut sessions) = state.sessions.lock() {
+                sessions.insert(session.id.clone(), session.clone());
+            }
+            if let Ok(mut tasks) = state.tasks.lock() {
+                if let Some(task) = tasks.get_mut(&task_id) {
+                    task.status = crate::agent::state::TaskStatus::Running;
+                    task.result = None;
+                    task.updated_at = unix_seconds();
+                    manager.persist_task(task, &machine_id);
+                }
+            }
+            manager.persist_session(&session);
+            if let Ok(mut flags) = state.cancel_flags.lock() {
+                flags.remove(&task_id);
+            }
+            let next_cancel = Arc::new(AtomicBool::new(false));
+            if let Ok(mut flags) = state.cancel_flags.lock() {
+                flags.insert(task_id.clone(), next_cancel.clone());
+            }
+            spawn_agent_task(
+                manager.clone(),
+                state.clone(),
+                broadcast_tx.clone(),
+                task_id.clone(),
+                session.id.clone(),
+                session,
+                machine_id.clone(),
+                next_cancel,
+            );
+            let _ = broadcast_tx.send(task_status_json(&task_id, "running"));
+            return;
+        }
+
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id, session.clone());
+        }
+        if let Ok(mut tasks) = state.tasks.lock() {
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.status = match status {
+                    "completed" => crate::agent::state::TaskStatus::Completed,
+                    "ready_for_check" => crate::agent::state::TaskStatus::WaitingApproval,
+                    "waiting_approval" => crate::agent::state::TaskStatus::WaitingApproval,
+                    "cancelled" => crate::agent::state::TaskStatus::Cancelled,
+                    "failed" => crate::agent::state::TaskStatus::Failed,
+                    _ => crate::agent::state::TaskStatus::Running,
+                };
+                task.result = result.clone().ok();
+                task.updated_at = unix_seconds();
+                manager.persist_task(task, &machine_id);
+            }
+        }
+        manager.persist_session(&session);
+        if let Ok(mut flags) = state.cancel_flags.lock() {
+            flags.remove(&task_id);
+        }
+        let _ = broadcast_tx.send(task_status_json(&task_id, status));
+        if let Err(error) = result {
+            let _ = broadcast_tx.send(error_json("agent_loop", &error));
+        }
+    });
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn task_status_json(task_id: &str, status: &str) -> String {
+    format!(
+        "{{\"event\":\"task_status\",\"task_id\":\"{}\",\"status\":\"{}\"}}",
+        escape(task_id),
+        escape(status)
+    )
+}
+
+fn user_message_json(task_id: &str, message_id: &str, content: &str) -> String {
+    format!(
+        "{{\"event\":\"user_message\",\"task_id\":\"{}\",\"message_id\":\"{}\",\"content\":\"{}\"}}",
+        escape(task_id),
+        escape(message_id),
+        escape(content)
+    )
+}
+
+fn loop_event_json(task_id: &str, event: &crate::agent::LoopEvent) -> Option<String> {
+    use crate::agent::{Attention, LoopEvent};
+    let task = escape(task_id);
+    match event {
+        LoopEvent::MessageAdded { role, content } if role == "assistant" => Some(format!(
+            "{{\"event\":\"assistant_message\",\"task_id\":\"{}\",\"message_id\":\"assistant-{}\",\"content\":\"{}\",\"streaming\":false}}",
+            task, task, escape(content)
+        )),
+        LoopEvent::MessageAdded { role, content } => Some(format!(
+            "{{\"event\":\"tool_output\",\"task_id\":\"{}\",\"call_id\":\"message-{}\",\"delta\":\"{}\"}}",
+            task, task, escape(content)
+        )),
+        LoopEvent::ModelStreaming { content } => Some(format!(
+            "{{\"event\":\"assistant_streaming\",\"task_id\":\"{}\",\"message_id\":\"assistant-{}\",\"delta\":\"{}\"}}",
+            task, task, escape(content)
+        )),
+        LoopEvent::ToolCallStarted { name, args, call_id } => Some(format!(
+            "{{\"event\":\"tool_started\",\"task_id\":\"{}\",\"call_id\":\"{}\",\"tool_name\":\"{}\",\"args_json\":\"{}\"}}",
+            task, escape(call_id), escape(name), escape(args)
+        )),
+        LoopEvent::ToolCallFinished { name, result, call_id, status, duration_ms } => Some(format!(
+            "{{\"event\":\"tool_finished\",\"task_id\":\"{}\",\"call_id\":\"{}\",\"tool_name\":\"{}\",\"status\":\"{}\",\"result\":\"{}\",\"duration_ms\":{}}}",
+            task, escape(call_id), escape(name), escape(status), escape(result), duration_ms
+        )),
+        LoopEvent::Attention { attention: Attention::PermissionRequired { tool, reason } } => Some(format!(
+            "{{\"event\":\"permission_required\",\"task_id\":\"{}\",\"permission_id\":\"permission-{}\",\"tool_name\":\"{}\",\"reason\":\"{}\"}}",
+            task, task, escape(tool), escape(reason)
+        )),
+        LoopEvent::Attention { attention: Attention::ReadyForCheck } => Some(format!(
+            "{{\"event\":\"ready_for_check\",\"task_id\":\"{}\",\"summary\":\"Agent is ready for review\",\"files_changed\":0,\"tests_passed\":false,\"browser_verified\":false}}",
+            task
+        )),
+        LoopEvent::Attention { attention: Attention::WaitingInput } => Some(task_status_json(task_id, "waiting_approval")),
+        LoopEvent::Attention { attention: Attention::Completed } => Some(task_status_json(task_id, "completed")),
+        LoopEvent::Completed { result } => Some(format!(
+            "{{\"event\":\"assistant_message\",\"task_id\":\"{}\",\"message_id\":\"final-{}\",\"content\":\"{}\",\"streaming\":false}}",
+            task, task, escape(result)
+        )),
+        LoopEvent::Failed { reason } => Some(format!(
+            "{{\"event\":\"error\",\"task_id\":\"{}\",\"message\":\"{}\",\"recoverable\":true}}",
+            task, escape(reason)
+        )),
+        LoopEvent::Cancelled => Some(task_status_json(task_id, "cancelled")),
+        _ => None,
     }
 }
 

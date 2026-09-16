@@ -371,7 +371,6 @@ pub struct SshTransport {
     /// Push-frame sink for events.
     events: EventSink,
     /// True while the machine is in the middle of a reconnect attempt.
-    #[allow(dead_code)] // polled by reconnect supervision (not yet wired)
     reconnecting: AtomicBool,
 }
 
@@ -772,6 +771,18 @@ impl SshTransport {
             bail!("machine {} ssh bridge is closed", self.machine_id);
         }
         Ok(connection)
+    }
+
+    /// Claim the background reconnect slot. Host-agent uses this to ensure a
+    /// broken bridge cannot create one SSH process per health tick.
+    pub fn begin_reconnect(&self) -> bool {
+        self.reconnecting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub fn finish_reconnect(&self) {
+        self.reconnecting.store(false, Ordering::Release);
     }
 
     /// Number of live ssh processes this transport owns (tests assert it is 0 or 1).

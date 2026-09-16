@@ -19,7 +19,9 @@
 //! - clicked @e12 → ● click indicator
 //! - filled @e8 "hello" → @e8 ← "hello"
 
-use gpui::{div, prelude::*, IntoElement};
+use std::sync::Arc;
+
+use gpui::{div, img, prelude::*, ImageFormat, IntoElement};
 use crate::stores::task::TaskEntity;
 
 pub struct BrowserPanel;
@@ -79,16 +81,20 @@ impl BrowserPanel {
                     .rounded_md()
                     .bg(gpui::rgb(0x0f172a))
                     .overflow_hidden()
-                    .child(if task.browser_snapshot.is_some() {
-                        // In real GPUI, render the JPEG/WebP frame as an image.
+                    .child(if let Some(bytes) = task.browser_snapshot.as_ref() {
+                        let format = match task.browser_format.to_ascii_lowercase().as_str() {
+                            "jpg" | "jpeg" => ImageFormat::Jpeg,
+                            "webp" => ImageFormat::Webp,
+                            "gif" => ImageFormat::Gif,
+                            _ => ImageFormat::Png,
+                        };
+                        let image = Arc::new(gpui::Image::from_bytes(format, bytes.clone()));
                         div()
                             .flex()
                             .items_center()
                             .justify_center()
                             .h_full()
-                            .text_color(gpui::rgb(0x3b82f6))
-                            .text_sm()
-                            .child("Browser frame loaded")
+                            .child(img(image).max_w_full())
                     } else {
                         div()
                             .flex()

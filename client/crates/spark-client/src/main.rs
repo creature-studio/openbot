@@ -37,6 +37,7 @@
 //! bootstrapping sandd, creating a runtime on `devbox` — all of it happens
 //! behind that socket.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 mod app;
@@ -142,73 +143,93 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// One long-lived connection to host-agent: commands out, events in.
+/// One reconnecting connection to host-agent: commands out, events in. The
+/// client owns no machine transport; this loop only maintains the local UDS
+/// link and retries it with bounded backoff after host-agent restarts.
 async fn run_host_agent_link(socket: PathBuf) -> Result<()> {
-    let stream = UnixStream::connect(&socket)
-        .await
-        .with_context(|| format!("connecting to {} (is `host-agent serve` running?)", socket.display()))?;
-    let (reader, mut writer) = stream.into_split();
-
-    // The UI side of the same link.
     let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<TransportCommand>();
-    // AppState forwards its command queue through the GPUI link module. Install
-    // the actual socket writer before the window is created so add-machine,
-    // composer, and runtime actions are not silently dropped.
     let command_sink = command_tx.clone();
     spark_ui::install_command_sender(move |command| {
         let _ = command_sink.send(command);
     });
-    // The socket is established before GPUI starts, so publish the connection
-    // transition into the same queue used by all later host-agent events.
-    spark_ui::push_event(TransportEvent::Connected);
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    // Commands → JSON lines.
-    tokio::spawn(async move {
-        while let Some(command) = command_rx.recv().await {
-            let Some(line) = command_to_json(&command) else {
-                continue;
+    type Reader = tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>;
+    let mut reader: Option<Reader> = None;
+    let mut writer: Option<tokio::net::unix::OwnedWriteHalf> = None;
+    let mut pending_lines: VecDeque<String> = VecDeque::new();
+    let mut retry: usize = 0;
+    let mut ever_connected = false;
+
+    loop {
+        if reader.is_none() || writer.is_none() {
+            if ever_connected {
+                let seconds = [1_u64, 2, 4, 8, 16, 30][retry.min(5)];
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                retry = retry.saturating_add(1);
+            }
+            match UnixStream::connect(&socket).await {
+                Ok(stream) => {
+                    let (read_half, write_half) = stream.into_split();
+                    reader = Some(BufReader::new(read_half).lines());
+                    writer = Some(write_half);
+                    retry = 0;
+                    ever_connected = true;
+                    spark_ui::push_event(TransportEvent::Connected);
+                    pending_lines.push_back(r#"{"cmd":"list_machines"}"#.to_string());
+                }
+                Err(error) => {
+                    tracing::warn!("host-agent link unavailable at {}: {error}", socket.display());
+                    continue;
+                }
+            }
+        }
+
+        while let Some(line) = pending_lines.pop_front() {
+            let Some(current_writer) = writer.as_mut() else {
+                pending_lines.push_front(line);
+                break;
             };
-            if writer.write_all(line.as_bytes()).await.is_err() {
-                break;
-            }
-            if writer.write_all(b"\n").await.is_err() {
+            if current_writer.write_all(line.as_bytes()).await.is_err()
+                || current_writer.write_all(b"\n").await.is_err()
+            {
+                reader = None;
+                writer = None;
+                spark_ui::push_event(TransportEvent::Disconnected {
+                    reason: Some("host-agent link write failed".into()),
+                });
+                pending_lines.push_front(line);
                 break;
             }
         }
-    });
-
-    // JSON lines → events.
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if event_tx.send(line).is_err() {
-                return;
-            }
+        if reader.is_none() {
+            continue;
         }
-        // Surface EOF separately; otherwise the UI remains permanently shown
-        // as connected after host-agent exits or the socket is severed.
-        let _ = event_tx.send(
-            r#"{"event":"disconnected","reason":"host-agent link closed"}"#.to_string(),
-        );
-    });
 
-    // Fan out: refresh_machines needs a follow-up command, everything else is a
-    // straight translation into `TransportEvent`.
-    while let Some(line) = event_rx.recv().await {
-        match event_to_transport_event(&line) {
-            EventAction::Emit(event) => {
-                spark_ui::push_event(event);
+        tokio::select! {
+            command = command_rx.recv() => {
+                let Some(command) = command else { return Ok(()); };
+                let Some(line) = command_to_json(&command) else { continue; };
+                pending_lines.push_back(line);
             }
-            EventAction::RefreshMachines => {
-                let _ = command_tx.send(TransportCommand::ListMachines);
+            result = reader.as_mut().expect("reader present").next_line() => {
+                match result {
+                    Ok(Some(line)) => match event_to_transport_event(&line) {
+                        EventAction::Emit(event) => spark_ui::push_event(event),
+                        EventAction::RefreshMachines => pending_lines.push_back(r#"{"cmd":"list_machines"}"#.to_string()),
+                        EventAction::Ignore => {}
+                    },
+                    Ok(None) | Err(_) => {
+                        reader = None;
+                        writer = None;
+                        spark_ui::push_event(TransportEvent::Disconnected {
+                            reason: Some("host-agent link closed".into()),
+                        });
+                    }
+                }
             }
-            EventAction::Ignore => {}
         }
     }
-    Ok(())
 }
-
 enum EventAction {
     Emit(TransportEvent),
     RefreshMachines,
@@ -339,9 +360,76 @@ fn event_to_transport_event(line: &str) -> EventAction {
             machine_id: value.get("machine_id").and_then(|v| v.as_str()).map(|id| MachineId::from_string(id.to_string())),
             runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).map(str::to_string),
         }),
+        "task_status" => EventAction::Emit(TransportEvent::TaskStatusChanged {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            status: value.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
+        }),
         "task_stopped" => EventAction::Emit(TransportEvent::TaskStatusChanged {
             task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
             status: "cancelled".to_string(),
+        }),
+        "assistant_streaming" => EventAction::Emit(TransportEvent::AssistantStreaming {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            message_id: value.get("message_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "assistant_message" => EventAction::Emit(TransportEvent::AssistantMessage {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            message_id: value.get("message_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            content: value.get("content").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            streaming: value.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
+        "tool_started" => EventAction::Emit(TransportEvent::ToolStarted {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            call_id: value.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            tool_name: value.get("tool_name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            args_json: value.get("args_json").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "tool_output" => EventAction::Emit(TransportEvent::ToolOutput {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            call_id: value.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "tool_finished" => EventAction::Emit(TransportEvent::ToolFinished {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            call_id: value.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            tool_name: value.get("tool_name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            status: value.get("status").and_then(|v| v.as_str()).unwrap_or("error").to_string(),
+            result: value.get("result").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            duration_ms: value.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        }),
+        "permission_required" => EventAction::Emit(TransportEvent::PermissionRequired {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            permission_id: value.get("permission_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            tool_name: value.get("tool_name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            reason: value.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "terminal_output" => {
+            let Some(data) = value.get("data").and_then(|v| v.as_str()).and_then(base64_decode) else {
+                return EventAction::Ignore;
+            };
+            EventAction::Emit(TransportEvent::TerminalOutput {
+                task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                data,
+            })
+        }
+        "terminal_exit" => EventAction::Emit(TransportEvent::TerminalExit {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            code: value.get("code").and_then(|v| v.as_i64()).map(|code| code as i32),
+        }),
+        "ready_for_check" => EventAction::Emit(TransportEvent::ReadyForCheck {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            summary: value.get("summary").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            files_changed: value.get("files_changed").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            tests_passed: value.get("tests_passed").and_then(|v| v.as_bool()).unwrap_or(false),
+            browser_verified: value.get("browser_verified").and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
+        "permission_resolved" => EventAction::Emit(TransportEvent::PermissionResolved {
+            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            permission_id: value.get("permission_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            allowed: value.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false),
         }),
         "check_confirmed" => EventAction::Emit(TransportEvent::CheckConfirmed {
             task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),

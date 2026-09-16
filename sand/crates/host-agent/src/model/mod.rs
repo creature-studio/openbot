@@ -7,7 +7,11 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ToolCall>,
 }
 
-pub trait Model {
+/// A model used by a task runner must be safe to move onto the blocking
+/// executor. Model calls are synchronous today (the OpenAI-compatible adapter
+/// invokes curl), so the serve layer isolates them from Tokio's async worker
+/// threads with `spawn_blocking`.
+pub trait Model: Send + Sync {
     fn chat(&self, messages: &[Message], tools: &ToolRegistry) -> Result<ModelResponse, String>;
     fn name(&self) -> &str;
 }

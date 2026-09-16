@@ -36,10 +36,13 @@ pub struct TaskEntity {
     pub artifacts: Vec<String>,
 
     pub browser_url: Option<String>,
-    pub browser_snapshot: Option<Vec<u8>>, // JPEG/WebP
+    pub browser_snapshot: Option<Vec<u8>>, // JPEG/WebP/PNG
+    pub browser_format: String,
     pub browser_actions: Vec<String>,
 
     pub terminal_ids: Vec<String>,
+    pub terminal_output: HashMap<String, Vec<u8>>,
+    pub terminal_exit: HashMap<String, Option<i32>>,
 
     pub file_changes: Vec<FileChange>,
 
@@ -71,8 +74,11 @@ impl TaskEntity {
             artifacts: Vec::new(),
             browser_url: None,
             browser_snapshot: None,
+            browser_format: "png".to_string(),
             browser_actions: Vec::new(),
             terminal_ids: Vec::new(),
+            terminal_output: HashMap::new(),
+            terminal_exit: HashMap::new(),
             file_changes: Vec::new(),
             connection_lost: false,
             created_at: now,
@@ -252,12 +258,48 @@ impl TaskStore {
                 runtime_id,
             } => {
                 let machine = machine_id.clone().unwrap_or_else(MachineId::local);
-                let task = TaskEntity::on_machine(machine, TaskId(task_id.clone()), goal.clone());
+                let mut task = TaskEntity::on_machine(machine, TaskId(task_id.clone()), goal.clone());
+                task.timeline.push(TimelineItem::UserMessage(UserMessage {
+                    id: format!("user-{}", task_id),
+                    content: goal.clone(),
+                    at: chrono::Utc::now(),
+                }));
                 let task = runtime_id
                     .clone()
                     .map(|runtime_id| task.with_runtime(runtime_id))
                     .unwrap_or(task);
-                self.add_task(task, cx);
+                // The UI creates an optimistic local row before host-agent
+                // allocates the real session/runtime id. Reconcile that row
+                // instead of displaying a duplicate task when task_created
+                // arrives.
+                let optimistic = self
+                    .tasks
+                    .iter()
+                    .find(|(_, existing)| {
+                        existing.runtime_id.is_none()
+                            && existing.machine_id == task.machine_id
+                            && existing.goal == task.goal
+                    })
+                    .map(|(id, _)| id.clone());
+                if let Some(optimistic_id) = optimistic {
+                    if let Some(mut existing) = self.tasks.remove(&optimistic_id) {
+                        existing.id = task.id.clone();
+                        existing.runtime_id = task.runtime_id.clone();
+                        existing.updated_at = chrono::Utc::now();
+                        if let Some(position) = self.order.iter().position(|id| id == &optimistic_id) {
+                            self.order[position] = task.id.clone();
+                        }
+                        if self.selected.as_ref() == Some(&optimistic_id) {
+                            self.selected = Some(task.id.clone());
+                        }
+                        self.tasks.insert(task.id.clone(), existing);
+                        cx.notify();
+                    } else {
+                        self.add_task(task, cx);
+                    }
+                } else {
+                    self.add_task(task, cx);
+                }
             }
 
             TransportEvent::TaskStatusChanged { task_id, status } => {
@@ -284,6 +326,33 @@ impl TaskStore {
                 }
             }
 
+            TransportEvent::AssistantStreaming {
+                task_id,
+                message_id,
+                delta,
+            } => {
+                if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    if let Some(TimelineItem::AssistantMessage(message)) = task
+                        .timeline
+                        .iter_mut()
+                        .rev()
+                        .find(|item| matches!(item, TimelineItem::AssistantMessage(message) if message.id.as_str() == message_id.as_str()))
+                    {
+                        message.content.push_str(delta);
+                        message.streaming = true;
+                    } else {
+                        task.timeline.push(TimelineItem::AssistantMessage(AssistantMessage {
+                            id: message_id.clone(),
+                            content: delta.clone(),
+                            streaming: true,
+                            at: chrono::Utc::now(),
+                        }));
+                    }
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
             TransportEvent::AssistantMessage {
                 task_id,
                 message_id,
@@ -291,13 +360,29 @@ impl TaskStore {
                 streaming,
             } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
-                    task.timeline
-                        .push(TimelineItem::AssistantMessage(AssistantMessage {
-                            id: message_id.clone(),
-                            content: content.clone(),
-                            streaming: *streaming,
-                            at: chrono::Utc::now(),
-                        }));
+                    let mut merged = false;
+                    if !*streaming {
+                        if let Some(TimelineItem::AssistantMessage(message)) = task
+                            .timeline
+                            .iter_mut()
+                            .rev()
+                            .find(|item| matches!(item, TimelineItem::AssistantMessage(message) if message.streaming))
+                        {
+                            message.id = message_id.clone();
+                            message.content = content.clone();
+                            message.streaming = false;
+                            merged = true;
+                        }
+                    }
+                    if !merged {
+                        task.timeline
+                            .push(TimelineItem::AssistantMessage(AssistantMessage {
+                                id: message_id.clone(),
+                                content: content.clone(),
+                                streaming: *streaming,
+                                at: chrono::Utc::now(),
+                            }));
+                    }
                     task.updated_at = chrono::Utc::now();
                     cx.notify();
                 }
@@ -400,6 +485,35 @@ impl TaskStore {
                 }
             }
 
+            TransportEvent::PermissionResolved {
+                task_id,
+                permission_id,
+                allowed,
+            } => {
+                if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    for item in &mut task.timeline {
+                        if let TimelineItem::Permission(permission) = item {
+                            if permission.id.as_str() == permission_id.as_str() {
+                                permission.resolved = Some(*allowed);
+                            }
+                        }
+                    }
+                    if task.status == TaskStatus::WaitingApproval {
+                        task.status = if *allowed { TaskStatus::Running } else { TaskStatus::Failed };
+                    }
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
+            TransportEvent::CheckConfirmed { task_id } => {
+                if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    task.status = TaskStatus::Completed;
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
             TransportEvent::ReadyForCheck {
                 task_id,
                 summary,
@@ -431,21 +545,53 @@ impl TaskStore {
                 }
             }
 
+            TransportEvent::TerminalOutput {
+                task_id,
+                terminal_id,
+                data,
+            } => {
+                if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    if !task.terminal_ids.iter().any(|id| id == terminal_id) {
+                        task.terminal_ids.push(terminal_id.clone());
+                    }
+                    task.terminal_output
+                        .entry(terminal_id.clone())
+                        .or_default()
+                        .extend_from_slice(data);
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
+            TransportEvent::TerminalExit {
+                task_id,
+                terminal_id,
+                code,
+            } => {
+                if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    task.terminal_exit.insert(terminal_id.clone(), *code);
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
             TransportEvent::BrowserScreenshot { task_id, frame } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
                     task.browser_snapshot = Some(frame.clone());
+                    task.browser_format = "jpeg".to_string();
                     // Don't notify for every frame; use a timer-based refresh.
                 }
             }
 
-            TransportEvent::BrowserFrame { runtime_id, data, .. }
-            | TransportEvent::ComputerFrame { runtime_id, data, .. } => {
+            TransportEvent::BrowserFrame { runtime_id, data, format, .. }
+            | TransportEvent::ComputerFrame { runtime_id, data, format, .. } => {
                 if let Some(task) = self
                     .tasks
                     .values_mut()
                     .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
                 {
                     task.browser_snapshot = Some(data.clone());
+                    task.browser_format = format.clone();
                     task.updated_at = chrono::Utc::now();
                     cx.notify();
                 }

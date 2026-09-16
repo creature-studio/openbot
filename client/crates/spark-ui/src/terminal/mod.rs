@@ -73,6 +73,18 @@ impl TerminalPanel {
         // Terminal content area
         // In a real GPUI build, this would use spark-terminal's TerminalModel
         // to read the grid cells and render them with proper ANSI colors.
+        let active_terminal = task.terminal_ids.first().cloned().unwrap_or_default();
+        let output = task
+            .terminal_output
+            .get(&active_terminal)
+            .map(|data| String::from_utf8_lossy(data).to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "$ █".to_string());
+        let exit_suffix = task
+            .terminal_exit
+            .get(&active_terminal)
+            .map(|code| format!("\n[process exited: {:?}]", code))
+            .unwrap_or_default();
         content = content.child(
             div()
                 .flex_1()
@@ -85,7 +97,7 @@ impl TerminalPanel {
                 .child(
                     div()
                         .text_color(gpui::rgb(0xcccccc))
-                        .child("$ █"),
+                        .child(format!("{}{}", output, exit_suffix)),
                 ),
         );
 

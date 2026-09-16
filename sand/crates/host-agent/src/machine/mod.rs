@@ -546,6 +546,9 @@ impl MachineManager {
             .find(|handle| handle.id() == *machine_id)
             .ok_or_else(|| anyhow!("machine not found: {machine_id}"))?;
         let transport = snapshot.transport.clone();
+        // Keep manual reconnect and the health supervisor from creating a
+        // second bridge while the first attempt is still backing off.
+        let _guard = snapshot.connecting.lock().await;
 
         let mut attempt = 0u32;
         loop {
@@ -688,6 +691,11 @@ impl MachineManager {
         for handle in self.handles() {
             let machine_id = handle.id();
             if !handle.transport.is_connected() {
+                let status = self
+                    .get_machine(&machine_id)
+                    .map(|machine| machine.status)
+                    .unwrap_or(MachineStatus::Disconnected);
+                out.push((machine_id, status));
                 continue;
             }
             match handle.transport.ping().await {
@@ -736,6 +744,33 @@ impl MachineManager {
                 return;
             }
             self.health_check_once().await;
+            self.schedule_reconnects().await;
+        }
+    }
+
+    /// Start at most one reconnect supervisor per disconnected SSH machine.
+    /// The supervisor uses the shared policy's jittered backoff and stops on
+    /// authentication or host-key failures; the remote runtime is never
+    /// destroyed while this bridge is being rebuilt.
+    pub(crate) async fn schedule_reconnects(self: &Arc<Self>) {
+        for handle in self.handles() {
+            let Some(ssh) = handle.ssh.clone() else { continue; };
+            let machine_id = handle.id();
+            let status = self
+                .get_machine(&machine_id)
+                .map(|machine| machine.status)
+                .unwrap_or(MachineStatus::Disconnected);
+            if ssh.is_connected()
+                || status == MachineStatus::RequiresUserAction
+                || !ssh.begin_reconnect()
+            {
+                continue;
+            }
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                let _ = manager.reconnect_machine(&machine_id).await;
+                ssh.finish_reconnect();
+            });
         }
     }
 
