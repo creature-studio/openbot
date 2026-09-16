@@ -1052,12 +1052,16 @@ fn browser_response_json(runtime_id: &str, response: &spark_transport::BrowserRe
             base64_encode(&frame.data),
         );
     }
-    let snapshot = response
-        .snapshot
+    let url = response
+        .url
         .as_deref()
-        .map(|v| format!("\"snapshot\":\"{}\"", escape(v)))
-        .unwrap_or_else(|| "\"snapshot\":null".into());
-    format!("{{\"event\":\"browser_result\",{} }}", snapshot)
+        .map(|value| format!("\"url\":\"{}\"", escape(value)))
+        .unwrap_or_else(|| "\"url\":null".to_string());
+    format!(
+        "{{\"event\":\"browser_result\",\"runtime_id\":\"{}\",{}}}",
+        escape(runtime_id),
+        url
+    )
 }
 
 fn computer_response_json(runtime_id: &str, response: &spark_transport::ComputerResponse) -> String {

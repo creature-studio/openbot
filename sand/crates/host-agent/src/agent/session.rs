@@ -173,9 +173,4 @@ impl AgentSession {
         new_sess
     }
 
-    pub fn transfer_runtime(&mut self, new_runtime_id: String) {
-        // Transfer session to new runtime (e.g., workbench -> task)
-        self.runtime_id = new_runtime_id;
-        self.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    }
 }

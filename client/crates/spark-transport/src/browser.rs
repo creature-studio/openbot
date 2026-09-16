@@ -87,7 +87,7 @@ pub async fn dispatch<T: RawRpc + ?Sized>(transport: &T, request: BrowserRequest
         BrowserAction::Open { url } => {
             let opened = spark_json::get_str(&response.json, "url").unwrap_or(url);
             Ok(BrowserResponse {
-                snapshot: Some(opened),
+                url: Some(opened),
                 ..Default::default()
             })
         }

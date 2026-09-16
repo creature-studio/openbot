@@ -5,7 +5,7 @@
 //! action to host-agent. It never opens SSH or talks to a runtime directly.
 
 use gpui::{
-    div, prelude::*, App, Context, Entity, IntoElement, KeyDownEvent, Render, Window,
+    div, prelude::*, App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, Render, Window,
 };
 use spark_model::TaskId;
 use spark_transport::TransportCommand;
@@ -21,6 +21,7 @@ pub struct Composer {
     command_tx: tokio::sync::mpsc::UnboundedSender<TransportCommand>,
     input_text: String,
     is_focused: bool,
+    focus_handle: FocusHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,7 @@ impl Composer {
             command_tx,
             input_text: String::new(),
             is_focused: false,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -169,6 +171,8 @@ impl Render for Composer {
             .unwrap_or_else(|| "Local".into());
 
         let machine_selector = self.machines.clone();
+        let focus_handle = self.focus_handle.clone();
+        let focus_for_click = focus_handle.clone();
         let mut input = div()
             .flex_1()
             .px_3()
@@ -183,6 +187,10 @@ impl Render for Composer {
             })
             .text_sm()
             .id("composer-input")
+            .track_focus(&focus_handle)
+            .on_click(move |_, window, _| {
+                window.focus(&focus_for_click);
+            })
             .on_key_down(cx.listener(Self::on_key_down));
         input = input.child(if self.input_text.is_empty() {
             div()

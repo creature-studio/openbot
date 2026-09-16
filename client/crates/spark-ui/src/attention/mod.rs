@@ -270,6 +270,147 @@ impl AttentionOverlay {
                     ),
             )
     }
+
+    fn render_error(
+        &self,
+        task_id: &str,
+        error: &str,
+        recoverable: bool,
+    ) -> impl IntoElement {
+        let close_attention = self.attention.clone();
+        let retry_attention = self.attention.clone();
+        let retry_tx = self.command_tx.clone();
+        let retry_id = task_id.to_string();
+        let retry = div()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(gpui::rgb(0x2563eb))
+            .cursor_pointer()
+            .id("error-retry")
+            .on_click(move |_, _, cx| {
+                if let Some(tx) = retry_tx.as_ref() {
+                    let command = if retry_id == "host-agent" {
+                        TransportCommand::Connect
+                    } else {
+                        TransportCommand::SendTaskMessage {
+                            task_id: retry_id.clone(),
+                            content: "Retry the failed operation.".to_string(),
+                        }
+                    };
+                    let _ = tx.send(command);
+                }
+                retry_attention.update(cx, |store, cx| store.clear(cx));
+            })
+            .child(if task_id == "host-agent" { "Reconnect" } else { "Retry" });
+        let close = div()
+            .mt_4()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(gpui::rgb(0x374151))
+            .cursor_pointer()
+            .id("error-dismiss")
+            .on_click(move |_, _, cx| {
+                close_attention.update(cx, |store, cx| store.clear(cx));
+            })
+            .child("Close");
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000060))
+            .child(
+                div()
+                    .w(px(420.0))
+                    .rounded_lg()
+                    .bg(gpui::rgb(0x1e293b))
+                    .border_1()
+                    .border_color(gpui::rgb(0xef4444))
+                    .p_6()
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(gpui::rgb(0xef4444))
+                            .mb_2()
+                            .child("Error"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .p_3()
+                            .rounded_md()
+                            .bg(gpui::rgb(0x5f1e1e30))
+                            .child(error.to_string()),
+                    )
+                    .child(
+                        div()
+                            .mt_4()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .when(recoverable, |d| d.child(retry))
+                            .child(close),
+                    ),
+            )
+    }
+
+    fn render_waiting_input(&self, task_id: &str, prompt: &str) -> impl IntoElement {
+        let response_attention = self.attention.clone();
+        let response_tx = self.command_tx.clone();
+        let response_id = task_id.to_string();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000060))
+            .child(
+                div()
+                    .w(px(420.0))
+                    .rounded_lg()
+                    .bg(gpui::rgb(0x1e293b))
+                    .border_1()
+                    .border_color(gpui::rgb(0x3b82f6))
+                    .p_6()
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(gpui::rgb(0x3b82f6))
+                            .mb_2()
+                            .child("Input Needed"),
+                    )
+                    .child(div().text_sm().mb_4().child(prompt.to_string()))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .px_4()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(gpui::rgb(0x3b82f6))
+                                    .cursor_pointer()
+                                    .id("waiting-input-continue")
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(tx) = response_tx.as_ref() {
+                                            let _ = tx.send(TransportCommand::SendTaskMessage {
+                                                task_id: response_id.clone(),
+                                                content: "Continue with the task.".to_string(),
+                                            });
+                                        }
+                                        response_attention.update(cx, |store, cx| store.clear(cx));
+                                    })
+                                    .child("Continue"),
+                            ),
+                    ),
+            )
+    }
 }
 
 impl Render for AttentionOverlay {
@@ -297,8 +438,6 @@ impl Render for AttentionOverlay {
         }
 
         let dismiss_completed = self.attention.clone();
-        let dismiss_error = self.attention.clone();
-        let dismiss_attention = self.attention.clone();
         let attention = self.attention.read(cx);
 
         match &attention.active {
@@ -370,97 +509,16 @@ impl Render for AttentionOverlay {
                 )
                 .into_any_element(),
 
-            AttentionSnapshot::Error { error, .. } => div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(0x00000060))
-                .child(
-                    div()
-                        .w(px(420.0))
-                        .rounded_lg()
-                        .bg(gpui::rgb(0x1e293b))
-                        .border_1()
-                        .border_color(gpui::rgb(0xef4444))
-                        .p_6()
-                        .child(
-                            div()
-                                .text_lg()
-                                .text_color(gpui::rgb(0xef4444))
-                                .mb_2()
-                                .child("Error"),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .p_3()
-                                .rounded_md()
-                                .bg(gpui::rgb(0x5f1e1e30))
-                                .child(error.clone()),
-                        )
-                        .child(
-                            div()
-                                .mt_4()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(gpui::rgb(0x374151))
-                                .cursor_pointer()
-                                .id("error-dismiss")
-                                .on_click(move |_, _, cx| {
-                                    dismiss_error.update(cx, |store, cx| store.clear(cx));
-                                })
-                                .child("Close"),
-                        ),
-                )
+            AttentionSnapshot::Error {
+                task_id,
+                error,
+                recoverable,
+            } => self
+                .render_error(task_id, error, *recoverable)
                 .into_any_element(),
 
-            AttentionSnapshot::WaitingInput { prompt, .. } => div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(0x00000060))
-                .child(
-                    div()
-                        .w(px(420.0))
-                        .rounded_lg()
-                        .bg(gpui::rgb(0x1e293b))
-                        .border_1()
-                        .border_color(gpui::rgb(0x3b82f6))
-                        .p_6()
-                        .child(
-                            div()
-                                .text_lg()
-                                .text_color(gpui::rgb(0x3b82f6))
-                                .mb_2()
-                                .child("Input Needed"),
-                        )
-                        .child(div().text_sm().mb_4().child(prompt.clone()))
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .child(
-                                    div()
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_md()
-                                        .bg(gpui::rgb(0x3b82f6))
-                                        .cursor_pointer()
-                                        .hover(|d| d.bg(gpui::rgb(0x2563eb)))
-                                        .text_sm()
-                                        .id("waiting-input-dismiss")
-                                        .on_click(move |_, _, cx| {
-                                            dismiss_attention.update(cx, |store, cx| store.clear(cx));
-                                        })
-                                        .child("Send Response"),
-                                ),
-                        ),
-                )
+            AttentionSnapshot::WaitingInput { task_id, prompt } => self
+                .render_waiting_input(task_id, prompt)
                 .into_any_element(),
         }
     }

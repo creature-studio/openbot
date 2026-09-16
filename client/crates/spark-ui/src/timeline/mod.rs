@@ -64,7 +64,6 @@ impl TaskTimeline {
         }
     }
 
-    #[allow(dead_code)] // wired to tool-card click handlers next
     fn toggle_tool(&mut self, id: &str) {
         if self.expanded_tools.contains(id) {
             self.expanded_tools.remove(id);
@@ -76,6 +75,7 @@ impl TaskTimeline {
 
 impl Render for TaskTimeline {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let timeline = cx.entity();
         let tasks = self.tasks.read(cx);
         let selected = tasks.selected_task();
 
@@ -110,7 +110,7 @@ impl Render for TaskTimeline {
         let mut items_div = div().flex().flex_col().gap_1().px_4().py_2();
 
         for item in &task.timeline {
-            items_div = items_div.child(self.render_timeline_item(&task.id.0, item));
+            items_div = items_div.child(self.render_timeline_item(&task.id.0, item, timeline.clone()));
         }
 
         div()
@@ -126,12 +126,17 @@ impl Render for TaskTimeline {
 }
 
 impl TaskTimeline {
-    fn render_timeline_item(&self, task_id: &str, item: &TimelineItem) -> impl IntoElement {
+    fn render_timeline_item(
+        &self,
+        task_id: &str,
+        item: &TimelineItem,
+        timeline: Entity<Self>,
+    ) -> impl IntoElement {
         match item {
             TimelineItem::UserMessage(msg) => self.render_user_message(msg).into_any_element(),
             TimelineItem::AssistantMessage(msg) => self.render_assistant_message(msg).into_any_element(),
             TimelineItem::Status(s) => self.render_status(s).into_any_element(),
-            TimelineItem::Tool(tool) => self.render_tool_card(tool).into_any_element(),
+            TimelineItem::Tool(tool) => self.render_tool_card(tool, timeline).into_any_element(),
             TimelineItem::Permission(perm) => self.render_permission(task_id, perm).into_any_element(),
             TimelineItem::ReadyForCheck(rfc) => self.render_ready_for_check(task_id, rfc).into_any_element(),
             TimelineItem::Error(err) => self.render_error(err).into_any_element(),
@@ -192,7 +197,7 @@ impl TaskTimeline {
             )
     }
 
-    fn render_tool_card(&self, tool: &ToolItem) -> impl IntoElement {
+    fn render_tool_card(&self, tool: &ToolItem, timeline: Entity<Self>) -> impl IntoElement {
         let is_running = tool.status == ToolItemStatus::Running;
         let is_expanded = self.expanded_tools.contains(&tool.id) || is_running;
         let is_error = tool.status == ToolItemStatus::Error;
@@ -238,11 +243,19 @@ impl TaskTimeline {
             .p_2();
 
         // Header row (always visible)
+        let tool_id = tool.id.clone();
         let header = div()
             .flex()
             .items_center()
             .justify_between()
             .cursor_pointer()
+            .id(format!("tool-toggle-{}", tool.id))
+            .on_click(move |_, _, cx| {
+                timeline.update(cx, |timeline, cx| {
+                    timeline.toggle_tool(&tool_id);
+                    cx.notify();
+                });
+            })
             .child(
                 div()
                     .flex()

@@ -185,12 +185,21 @@ impl AppState {
             .selected_task()
             .and_then(|task| task.attention.clone().map(|attention| (task.id.0.clone(), attention)));
         if let Some((task_id, attention)) = mirror {
-            let already_shown = self.attention.read(cx).has_active();
-            if !already_shown {
-                self.attention.update(cx, |store, cx| {
-                    store.set(task_id, &attention, cx);
-                });
-            }
+            // Always reconcile the global overlay with the selected task. The
+            // previous implementation only set it when empty, which left a
+            // permission/error modal stale after the task had already resumed.
+            self.attention.update(cx, |store, cx| {
+                store.set(task_id, &attention, cx);
+            });
+        } else if self
+            .attention
+            .read(cx)
+            .active_task_id()
+            .is_some_and(|task_id| task_id != "host-agent")
+        {
+            // A resolved permission/check or a task status update clears the
+            // task-owned attention even when no button was clicked in this UI.
+            self.attention.update(cx, |store, cx| store.clear(cx));
         }
     }
 

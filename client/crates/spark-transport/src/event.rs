@@ -154,6 +154,10 @@ pub enum TransportEvent {
         task_id: String,
         action: String, // "click @e12", "fill @e8 \"hello\"", etc.
     },
+    BrowserResult {
+        runtime_id: String,
+        url: Option<String>,
+    },
 
     // ----- Terminal -----
     TerminalOpened {

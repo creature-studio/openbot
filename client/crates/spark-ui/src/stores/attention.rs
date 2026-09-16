@@ -6,7 +6,7 @@
 use gpui::{Context, EventEmitter};
 use spark_model::Attention;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionSnapshot {
     None,
     PermissionRequired {
@@ -29,6 +29,7 @@ pub enum AttentionSnapshot {
     Error {
         task_id: String,
         error: String,
+        recoverable: bool,
     },
     Completed {
         task_id: String,
@@ -89,15 +90,19 @@ impl AttentionStore {
                 tests_passed: *tests_passed,
                 browser_verified: *browser_verified,
             },
-            Attention::ExecutionError { error, .. } => AttentionSnapshot::Error {
+            Attention::ExecutionError { error, recoverable } => AttentionSnapshot::Error {
                 task_id: task_id.clone(),
                 error: error.clone(),
+                recoverable: *recoverable,
             },
             Attention::Completed { summary } => AttentionSnapshot::Completed {
                 task_id: task_id.clone(),
                 summary: summary.clone(),
             },
         };
+        if self.active == snapshot {
+            return;
+        }
         self.history.push((task_id, snapshot.clone()));
         self.active = snapshot;
         cx.notify();
@@ -123,5 +128,16 @@ impl AttentionStore {
 
     pub fn has_active(&self) -> bool {
         !matches!(self.active, AttentionSnapshot::None)
+    }
+
+    pub fn active_task_id(&self) -> Option<&str> {
+        match &self.active {
+            AttentionSnapshot::None => None,
+            AttentionSnapshot::PermissionRequired { task_id, .. }
+            | AttentionSnapshot::WaitingInput { task_id, .. }
+            | AttentionSnapshot::ReadyForCheck { task_id, .. }
+            | AttentionSnapshot::Error { task_id, .. }
+            | AttentionSnapshot::Completed { task_id, .. } => Some(task_id.as_str()),
+        }
     }
 }

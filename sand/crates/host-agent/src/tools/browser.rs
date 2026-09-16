@@ -34,7 +34,9 @@ fn run(ctx: Option<&ToolExecutionContext>, runtime_id: &str, action: BrowserActi
     let response = super::context::block_on_transport(transport.browser_request(BrowserRequest { runtime_id: runtime_id.into(), action }))
         .map_err(|e| format!("browser request failed: {e}"))?;
     if let Some(error) = response.error { return Ok(ToolResult::error(error, Some("BROWSER_FAILED".into()))); }
-    let content = if let Some(snapshot) = response.snapshot {
+    let content = if let Some(url) = response.url {
+        url
+    } else if let Some(snapshot) = response.snapshot {
         snapshot
     } else if let Some(frame) = response.frame {
         format!("frame_id={} {}x{} {} bytes {}", frame.frame_id, frame.width, frame.height, frame.data.len(), frame.format)

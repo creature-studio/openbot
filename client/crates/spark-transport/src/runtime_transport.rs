@@ -344,6 +344,7 @@ pub struct BrowserFrame {
 #[derive(Debug, Clone, Default)]
 pub struct BrowserResponse {
     pub snapshot: Option<String>,
+    pub url: Option<String>,
     pub tabs: Option<Vec<BrowserTab>>,
     pub frame: Option<BrowserFrame>,
     pub error: Option<String>,

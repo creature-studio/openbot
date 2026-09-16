@@ -313,7 +313,35 @@ impl TaskStore {
 
             TransportEvent::TaskStatusChanged { task_id, status } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
-                    task.status = parse_task_status(status);
+                    let next_status = parse_task_status(status);
+                    task.status = next_status.clone();
+                    match next_status {
+                        TaskStatus::Completed => {
+                            task.attention = Some(Attention::Completed {
+                                summary: task
+                                    .result
+                                    .clone()
+                                    .unwrap_or_else(|| "Task completed".to_string()),
+                            });
+                        }
+                        TaskStatus::Failed => {
+                            task.attention = Some(Attention::ExecutionError {
+                                error: task
+                                    .result
+                                    .clone()
+                                    .unwrap_or_else(|| "Task failed".to_string()),
+                                recoverable: true,
+                            });
+                        }
+                        TaskStatus::Running => {
+                            // A running update is the acknowledgement for a
+                            // permission/attention action. The host-agent event
+                            // remains the source of truth, so stale overlays are
+                            // removed when the worker resumes.
+                            task.attention = None;
+                        }
+                        _ => {}
+                    }
                     task.updated_at = chrono::Utc::now();
                     cx.notify();
                 }
@@ -683,6 +711,22 @@ impl TaskStore {
             TransportEvent::BrowserAction { task_id, action } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
                     task.browser_actions.push(action.clone());
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
+            TransportEvent::BrowserResult { runtime_id, url } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
+                    if let Some(url) = url {
+                        task.browser_url = Some(url.clone());
+                    }
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
                 }
             }
 
@@ -703,6 +747,10 @@ impl TaskStore {
                             recoverable: *recoverable,
                             at: chrono::Utc::now(),
                         }));
+                        task.attention = Some(Attention::ExecutionError {
+                            error: message.clone(),
+                            recoverable: *recoverable,
+                        });
                         task.updated_at = chrono::Utc::now();
                         cx.notify();
                     }

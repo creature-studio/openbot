@@ -465,6 +465,17 @@ fn event_to_transport_event(line: &str) -> EventAction {
         "check_confirmed" => EventAction::Emit(TransportEvent::CheckConfirmed {
             task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
         }),
+        "browser_result" => EventAction::Emit(TransportEvent::BrowserResult {
+            runtime_id: value
+                .get("runtime_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            url: value
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        }),
         "browser_frame" | "computer_frame" => {
             let runtime_id = value
                 .get("runtime_id")
