@@ -404,21 +404,52 @@ fn event_to_transport_event(line: &str) -> EventAction {
             tool_name: value.get("tool_name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
             reason: value.get("reason").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
         }),
+        "terminal_opened" => EventAction::Emit(TransportEvent::TerminalOpened {
+            runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
+        "terminal_closed" => EventAction::Emit(TransportEvent::TerminalClosed {
+            runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        }),
         "terminal_output" => {
             let Some(data) = value.get("data").and_then(|v| v.as_str()).and_then(base64_decode) else {
                 return EventAction::Ignore;
             };
-            EventAction::Emit(TransportEvent::TerminalOutput {
-                task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                data,
-            })
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if task_id.is_empty() {
+                EventAction::Emit(TransportEvent::TerminalRuntimeOutput {
+                    runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    terminal_id,
+                    data,
+                })
+            } else {
+                EventAction::Emit(TransportEvent::TerminalOutput {
+                    task_id: task_id.to_string(),
+                    terminal_id,
+                    data,
+                })
+            }
         }
-        "terminal_exit" => EventAction::Emit(TransportEvent::TerminalExit {
-            task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            terminal_id: value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            code: value.get("code").and_then(|v| v.as_i64()).map(|code| code as i32),
-        }),
+        "terminal_exit" => {
+            let task_id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let code = value.get("code").and_then(|v| v.as_i64()).map(|code| code as i32);
+            if task_id.is_empty() {
+                EventAction::Emit(TransportEvent::TerminalRuntimeExit {
+                    runtime_id: value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    terminal_id,
+                    code,
+                })
+            } else {
+                EventAction::Emit(TransportEvent::TerminalExit {
+                    task_id: task_id.to_string(),
+                    terminal_id,
+                    code,
+                })
+            }
+        },
         "ready_for_check" => EventAction::Emit(TransportEvent::ReadyForCheck {
             task_id: value.get("task_id").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
             summary: value.get("summary").and_then(|v| v.as_str()).unwrap_or_default().to_string(),

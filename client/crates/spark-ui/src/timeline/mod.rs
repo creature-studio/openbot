@@ -44,16 +44,22 @@ use crate::stores::TaskStore;
 
 pub struct TaskTimeline {
     tasks: Entity<TaskStore>,
+    command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
     /// Set of tool item IDs that are manually expanded.
     expanded_tools: std::collections::HashSet<String>,
 }
 
 impl TaskTimeline {
-    pub fn new(tasks: Entity<TaskStore>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        tasks: Entity<TaskStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
 
         Self {
             tasks,
+            command_tx,
             expanded_tools: std::collections::HashSet::new(),
         }
     }
@@ -104,7 +110,7 @@ impl Render for TaskTimeline {
         let mut items_div = div().flex().flex_col().gap_1().px_4().py_2();
 
         for item in &task.timeline {
-            items_div = items_div.child(self.render_timeline_item(item));
+            items_div = items_div.child(self.render_timeline_item(&task.id.0, item));
         }
 
         div()
@@ -120,14 +126,14 @@ impl Render for TaskTimeline {
 }
 
 impl TaskTimeline {
-    fn render_timeline_item(&self, item: &TimelineItem) -> impl IntoElement {
+    fn render_timeline_item(&self, task_id: &str, item: &TimelineItem) -> impl IntoElement {
         match item {
             TimelineItem::UserMessage(msg) => self.render_user_message(msg).into_any_element(),
             TimelineItem::AssistantMessage(msg) => self.render_assistant_message(msg).into_any_element(),
             TimelineItem::Status(s) => self.render_status(s).into_any_element(),
             TimelineItem::Tool(tool) => self.render_tool_card(tool).into_any_element(),
-            TimelineItem::Permission(perm) => self.render_permission(perm).into_any_element(),
-            TimelineItem::ReadyForCheck(rfc) => self.render_ready_for_check(rfc).into_any_element(),
+            TimelineItem::Permission(perm) => self.render_permission(task_id, perm).into_any_element(),
+            TimelineItem::ReadyForCheck(rfc) => self.render_ready_for_check(task_id, rfc).into_any_element(),
             TimelineItem::Error(err) => self.render_error(err).into_any_element(),
             TimelineItem::Artifact(art) => self.render_artifact(art).into_any_element(),
         }
@@ -332,40 +338,24 @@ impl TaskTimeline {
         card
     }
 
-    fn render_permission(&self, perm: &PermissionItem) -> impl IntoElement {
+    fn render_permission(&self, task_id: &str, perm: &PermissionItem) -> impl IntoElement {
+        let allow_tx = self.command_tx.clone();
+        let deny_tx = self.command_tx.clone();
+        let allow_task = task_id.to_string();
+        let deny_task = task_id.to_string();
+        let permission_id = perm.id.clone();
+        let deny_permission = permission_id.clone();
         div()
             .rounded_lg()
             .border_1()
             .border_color(gpui::rgb(0xf59e0b))
             .bg(gpui::rgba(0x451a0320))
             .p_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .mb_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(gpui::rgb(0xf59e0b))
-                            .child("⚠ Permission Required"),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .child(format!("Tool: {}", perm.tool_name)),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(gpui::rgb(0x9ca3af))
-                    .mt_1()
-                    .child(perm.reason.clone()),
-            )
-            .when(perm.resolved.is_none(), |d| {
-                d.child(
+            .child(div().text_sm().text_color(gpui::rgb(0xf59e0b)).child("⚠ Permission Required"))
+            .child(div().text_sm().child(format!("Tool: {}", perm.tool_name)))
+            .child(div().text_xs().text_color(gpui::rgb(0x9ca3af)).mt_1().child(perm.reason.clone()))
+            .when(perm.resolved.is_none(), |card| {
+                card.child(
                     div()
                         .flex()
                         .gap_2()
@@ -378,6 +368,13 @@ impl TaskTimeline {
                                 .bg(gpui::rgb(0x1e293b))
                                 .cursor_pointer()
                                 .text_sm()
+                                .id(format!("timeline-permission-deny-{}", perm.id))
+                                .on_click(move |_, _, _| {
+                                    let _ = deny_tx.send(spark_transport::TransportCommand::DenyPermission {
+                                        task_id: deny_task.clone(),
+                                        permission_id: deny_permission.clone(),
+                                    });
+                                })
                                 .child("Cancel"),
                         )
                         .child(
@@ -388,32 +385,31 @@ impl TaskTimeline {
                                 .bg(gpui::rgb(0x059669))
                                 .cursor_pointer()
                                 .text_sm()
+                                .id(format!("timeline-permission-allow-{}", perm.id))
+                                .on_click(move |_, _, _| {
+                                    let _ = allow_tx.send(spark_transport::TransportCommand::ApprovePermission {
+                                        task_id: allow_task.clone(),
+                                        permission_id: permission_id.clone(),
+                                    });
+                                })
                                 .child("Allow Once"),
                         ),
                 )
             })
     }
 
-    fn render_ready_for_check(&self, rfc: &ReadyForCheckItem) -> impl IntoElement {
+    fn render_ready_for_check(&self, task_id: &str, rfc: &ReadyForCheckItem) -> impl IntoElement {
+        let continue_tx = self.command_tx.clone();
+        let confirm_tx = self.command_tx.clone();
+        let continue_task = task_id.to_string();
+        let confirm_task = task_id.to_string();
         div()
             .rounded_lg()
             .border_1()
             .border_color(gpui::rgb(0x10b981))
             .bg(gpui::rgba(0x064e3b20))
             .p_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .mb_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(gpui::rgb(0x10b981))
-                            .child("✓ Ready for Check"),
-                    ),
-            )
+            .child(div().text_sm().text_color(gpui::rgb(0x10b981)).child("✓ Ready for Check"))
             .child(div().text_sm().child(rfc.summary.clone()))
             .child(
                 div()
@@ -423,16 +419,8 @@ impl TaskTimeline {
                     .text_xs()
                     .text_color(gpui::rgb(0x9ca3af))
                     .child(format!("{} files changed", rfc.files_changed))
-                    .child(if rfc.tests_passed {
-                        "Tests passed".to_string()
-                    } else {
-                        "Tests not run".to_string()
-                    })
-                    .child(if rfc.browser_verified {
-                        "Browser verified".to_string()
-                    } else {
-                        "".to_string()
-                    }),
+                    .child(if rfc.tests_passed { "Tests passed".to_string() } else { "Tests not run".to_string() })
+                    .child(if rfc.browser_verified { "Browser verified".to_string() } else { String::new() }),
             )
             .child(
                 div()
@@ -447,6 +435,13 @@ impl TaskTimeline {
                             .bg(gpui::rgb(0x1e293b))
                             .cursor_pointer()
                             .text_sm()
+                            .id(format!("timeline-ready-continue-{}", rfc.id))
+                            .on_click(move |_, _, _| {
+                                let _ = continue_tx.send(spark_transport::TransportCommand::SendTaskMessage {
+                                    task_id: continue_task.clone(),
+                                    content: "Continue with the task.".to_string(),
+                                });
+                            })
                             .child("Continue"),
                     )
                     .child(
@@ -457,6 +452,12 @@ impl TaskTimeline {
                             .bg(gpui::rgb(0x059669))
                             .cursor_pointer()
                             .text_sm()
+                            .id(format!("timeline-ready-confirm-{}", rfc.id))
+                            .on_click(move |_, _, _| {
+                                let _ = confirm_tx.send(spark_transport::TransportCommand::ConfirmComplete {
+                                    task_id: confirm_task.clone(),
+                                });
+                            })
                             .child("Confirm Complete"),
                     ),
             )

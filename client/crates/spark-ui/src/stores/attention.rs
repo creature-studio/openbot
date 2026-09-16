@@ -11,6 +11,7 @@ pub enum AttentionSnapshot {
     None,
     PermissionRequired {
         task_id: String,
+        permission_id: Option<String>,
         tool: String,
         reason: String,
     },
@@ -65,9 +66,10 @@ impl AttentionStore {
             Attention::PermissionRequired {
                 tool,
                 reason,
-                detail: _,
+                detail,
             } => AttentionSnapshot::PermissionRequired {
                 task_id: task_id.clone(),
+                permission_id: detail.clone(),
                 tool: tool.clone(),
                 reason: reason.clone(),
             },

@@ -28,7 +28,10 @@ pub struct BrowserPanel;
 
 impl BrowserPanel {
     /// Render the browser panel for a task (static helper for non-entity usage).
-    pub fn render_static(task: Option<&TaskEntity>) -> impl IntoElement {
+    pub fn render_static(
+        task: Option<&TaskEntity>,
+        command_tx: &tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+    ) -> impl IntoElement {
         let Some(task) = task else {
             return div()
                 .flex()
@@ -43,6 +46,36 @@ impl BrowserPanel {
             .browser_url
             .as_deref()
             .unwrap_or("No browser session");
+        let mut refresh_button = div().text_xs().cursor_pointer().child("↻");
+        let mut open_button = div().text_xs().cursor_pointer().child("↗");
+        if let Some(runtime_id) = task.runtime_id.clone() {
+            let refresh_tx = command_tx.clone();
+            let open_tx = command_tx.clone();
+            let refresh_runtime = runtime_id.clone();
+            let open_runtime = runtime_id;
+            let open_url = url.to_string();
+            refresh_button = refresh_button
+                .id("browser-refresh")
+                .on_click(move |_, _, _| {
+                    let _ = refresh_tx.send(spark_transport::TransportCommand::BrowserAction {
+                        runtime_id: refresh_runtime.clone(),
+                        action: spark_transport::BrowserAction::Screenshot {
+                            format: "jpeg".to_string(),
+                            quality: 80,
+                        },
+                    });
+                });
+            open_button = open_button
+                .id("browser-open")
+                .on_click(move |_, _, _| {
+                    let _ = open_tx.send(spark_transport::TransportCommand::BrowserAction {
+                        runtime_id: open_runtime.clone(),
+                        action: spark_transport::BrowserAction::Open {
+                            url: open_url.clone(),
+                        },
+                    });
+                });
+        }
 
         div()
             .flex()
@@ -70,8 +103,8 @@ impl BrowserPanel {
                         div()
                             .flex()
                             .gap_2()
-                            .child(div().text_xs().cursor_pointer().child("↻"))
-                            .child(div().text_xs().cursor_pointer().child("↗")),
+                            .child(refresh_button)
+                            .child(open_button),
                     ),
             )
             // Screenshot area

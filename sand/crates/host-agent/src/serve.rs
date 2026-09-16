@@ -513,7 +513,42 @@ async fn handle_command(
             let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let request = spark_transport::PtyOpenRequest { runtime_id: runtime_id.clone(), pty_id: terminal_id.clone(), cols: value.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16, rows: value.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16, shell: "/bin/bash".into() };
-            match manager.open_pty(&runtime_id, request).await { Ok(()) => Some(format!("{{\"event\":\"terminal_opened\",\"runtime_id\":\"{}\",\"terminal_id\":\"{}\"}}", escape(&runtime_id), escape(&terminal_id))), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+            match manager.open_pty(&runtime_id, request).await {
+                Ok(()) => {
+                    let poll_manager = manager.clone();
+                    let poll_broadcast = broadcast_tx.clone();
+                    let poll_runtime = runtime_id.clone();
+                    let poll_terminal = terminal_id.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            let request = spark_transport::PtyReadRequest {
+                                runtime_id: poll_runtime.clone(),
+                                pty_id: poll_terminal.clone(),
+                                clear: true,
+                            };
+                            match poll_manager.read_pty(&poll_runtime, request).await {
+                                Ok(response) => {
+                                    if !response.data.is_empty() {
+                                        let _ = poll_broadcast.send(format!(
+                                            "{{\"event\":\"terminal_output\",\"runtime_id\":\"{}\",\"terminal_id\":\"{}\",\"data\":\"{}\"}}",
+                                            escape(&poll_runtime),
+                                            escape(&poll_terminal),
+                                            base64_encode(&response.data)
+                                        ));
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    });
+                    Some(format!(
+                        "{{\"event\":\"terminal_opened\",\"runtime_id\":\"{}\",\"terminal_id\":\"{}\"}}",
+                        escape(&runtime_id), escape(&terminal_id)
+                    ))
+                }
+                Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
         }
         "write_terminal" => {
             let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -530,7 +565,13 @@ async fn handle_command(
         "close_terminal" => {
             let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default();
             let terminal_id = value.get("terminal_id").and_then(|v| v.as_str()).unwrap_or_default();
-            match manager.close_pty(runtime_id, terminal_id).await { Ok(()) => Some(ok_json(&cmd)), Err(e) => Some(error_json(&cmd, &e.to_string())) }
+            match manager.close_pty(runtime_id, terminal_id).await {
+                Ok(()) => Some(format!(
+                    "{{\"event\":\"terminal_closed\",\"runtime_id\":\"{}\",\"terminal_id\":\"{}\"}}",
+                    escape(runtime_id), escape(terminal_id)
+                )),
+                Err(e) => Some(error_json(&cmd, &e.to_string())),
+            }
         }
         "browser_action" => {
             let runtime_id = value.get("runtime_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();

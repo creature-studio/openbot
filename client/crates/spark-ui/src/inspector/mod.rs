@@ -37,11 +37,17 @@ pub enum InspectorTab {
 pub struct Inspector {
     tasks: Entity<TaskStore>,
     machines: Entity<MachineStore>,
+    command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
     active_tab: InspectorTab,
 }
 
 impl Inspector {
-    pub fn new(tasks: Entity<TaskStore>, machines: Entity<MachineStore>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        tasks: Entity<TaskStore>,
+        machines: Entity<MachineStore>,
+        command_tx: tokio::sync::mpsc::UnboundedSender<spark_transport::TransportCommand>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&tasks, |_, _, cx| cx.notify()).detach();
         cx.observe(&machines, |_, _, cx| cx.notify()).detach();
 
@@ -50,6 +56,7 @@ impl Inspector {
         Self {
             tasks,
             machines,
+            command_tx,
             active_tab: InspectorTab::Browser,
         }
     }
@@ -123,19 +130,19 @@ impl Inspector {
                 div()
                     .flex_1()
                     .p_3()
-                    .child(BrowserPanel::render_static(task))
+                    .child(BrowserPanel::render_static(task, &self.command_tx))
             }
             InspectorTab::Files => {
                 div()
                     .flex_1()
                     .p_3()
-                    .child(DiffPanel::render_static(task))
+                    .child(DiffPanel::render_static(task, self.tasks.clone()))
             }
             InspectorTab::Terminal => {
                 div()
                     .flex_1()
                     .p_3()
-                    .child(TerminalPanel::render_static(task))
+                    .child(TerminalPanel::render_static(task, &self.command_tx))
             }
             InspectorTab::Runtime => {
                 // The machine of the *selected task's* runtime: for a task on

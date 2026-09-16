@@ -15,13 +15,16 @@
 //! └──────────────────────────────┘
 //! ```
 
-use gpui::{div, prelude::*, IntoElement};
-use crate::stores::task::TaskEntity;
+use gpui::{div, prelude::*, Entity, IntoElement};
+use crate::stores::task::{TaskEntity, TaskStore};
 
 pub struct DiffPanel;
 
 impl DiffPanel {
-    pub fn render_static(task: Option<&TaskEntity>) -> impl IntoElement {
+    pub fn render_static(
+        task: Option<&TaskEntity>,
+        tasks: Entity<TaskStore>,
+    ) -> impl IntoElement {
         let Some(task) = task else {
             return div()
                 .flex()
@@ -57,6 +60,10 @@ impl DiffPanel {
         let mut file_list = div().flex().flex_col().gap_1().mb_3();
 
         for change in &task.file_changes {
+            let selected = task.selected_file.as_deref() == Some(change.path.as_str());
+            let change_path = change.path.clone();
+            let task_id = task.id.clone();
+            let task_store = tasks.clone();
             let icon = match &change.kind {
                 spark_model::FileChangeKind::Added => "A",
                 spark_model::FileChangeKind::Modified => "M",
@@ -72,7 +79,14 @@ impl DiffPanel {
                     .px_2()
                     .py_1()
                     .rounded_md()
+                    .when(selected, |d| d.bg(gpui::rgb(0x1e293b)))
                     .cursor_pointer()
+                    .id(format!("diff-file-{}", change_path))
+                    .on_click(move |_, _, cx| {
+                        task_store.update(cx, |tasks, cx| {
+                            tasks.select_file(&task_id, change_path.clone(), cx);
+                        });
+                    })
                     .hover(|d| d.bg(gpui::rgb(0x1e293b)))
                     .child(
                         div()
@@ -122,8 +136,13 @@ impl DiffPanel {
 
         content = content.child(file_list);
 
-        // Diff view for first file (in production, selected file)
-        if let Some(first) = task.file_changes.first() {
+        // Diff view for the selected file; default to the first change.
+        let selected_change = task
+            .selected_file
+            .as_deref()
+            .and_then(|path| task.file_changes.iter().find(|change| change.path == path))
+            .or_else(|| task.file_changes.first());
+        if let Some(first) = selected_change {
             if let Some(ref diff_text) = first.diff {
                 content = content.child(
                     div()

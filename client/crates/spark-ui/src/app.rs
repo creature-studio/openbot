@@ -344,18 +344,18 @@ impl RootView {
         };
 
         let sidebar = cx.new(|cx| Sidebar::new(bots, tasks.clone(), workbenches, machines.clone(), command_tx.clone(), cx));
-        let timeline = cx.new(|cx| TaskTimeline::new(tasks.clone(), cx));
-        let inspector = cx.new(|cx| Inspector::new(tasks.clone(), machines.clone(), cx));
+        let timeline = cx.new(|cx| TaskTimeline::new(tasks.clone(), command_tx.clone(), cx));
+        let inspector = cx.new(|cx| Inspector::new(tasks.clone(), machines.clone(), command_tx.clone(), cx));
         let composer = cx.new(|cx| {
             Composer::new(
-                tasks,
+                tasks.clone(),
                 connection,
                 machines.clone(),
                 command_tx.clone(),
                 cx,
             )
         });
-        let attention = cx.new(|cx| AttentionOverlay::with_machines(attention, machines, command_tx, cx));
+        let attention = cx.new(|cx| AttentionOverlay::with_machines(attention, machines, tasks.clone(), command_tx, cx));
 
         Self {
             state,

@@ -45,6 +45,7 @@ pub struct TaskEntity {
     pub terminal_exit: HashMap<String, Option<i32>>,
 
     pub file_changes: Vec<FileChange>,
+    pub selected_file: Option<String>,
 
     /// True while the machine of this task has no bridge. The task is paused,
     /// not failed — see [`TaskEntity::mark_connection_lost`].
@@ -80,6 +81,7 @@ impl TaskEntity {
             terminal_output: HashMap::new(),
             terminal_exit: HashMap::new(),
             file_changes: Vec::new(),
+            selected_file: None,
             connection_lost: false,
             created_at: now,
             updated_at: now,
@@ -244,6 +246,14 @@ impl TaskStore {
 
     pub fn get_mut(&mut self, id: &TaskId) -> Option<&mut TaskEntity> {
         self.tasks.get_mut(id)
+    }
+
+    pub fn select_file(&mut self, task_id: &TaskId, path: String, cx: &mut Context<Self>) {
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.selected_file = Some(path);
+            task.updated_at = chrono::Utc::now();
+            cx.notify();
+        }
     }
 
     /// Process a transport event and update the relevant task.
@@ -468,7 +478,7 @@ impl TaskStore {
                     task.attention = Some(Attention::PermissionRequired {
                         tool: tool_name.clone(),
                         reason: reason.clone(),
-                        detail: None,
+                        detail: Some(permission_id.clone()),
                     });
                     task.timeline
                         .push(TimelineItem::Permission(PermissionItem {
@@ -501,6 +511,7 @@ impl TaskStore {
                     if task.status == TaskStatus::WaitingApproval {
                         task.status = if *allowed { TaskStatus::Running } else { TaskStatus::Failed };
                     }
+                    task.attention = None;
                     task.updated_at = chrono::Utc::now();
                     cx.notify();
                 }
@@ -509,6 +520,7 @@ impl TaskStore {
             TransportEvent::CheckConfirmed { task_id } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
                     task.status = TaskStatus::Completed;
+                    task.attention = None;
                     task.updated_at = chrono::Utc::now();
                     cx.notify();
                 }
@@ -545,6 +557,40 @@ impl TaskStore {
                 }
             }
 
+            TransportEvent::TerminalOpened {
+                runtime_id,
+                terminal_id,
+            } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
+                    if !task.terminal_ids.iter().any(|id| id == terminal_id) {
+                        task.terminal_ids.push(terminal_id.clone());
+                    }
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
+            TransportEvent::TerminalClosed {
+                runtime_id,
+                terminal_id,
+            } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
+                    task.terminal_ids.retain(|id| id != terminal_id);
+                    task.terminal_output.remove(terminal_id);
+                    task.terminal_exit.remove(terminal_id);
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
             TransportEvent::TerminalOutput {
                 task_id,
                 terminal_id,
@@ -563,12 +609,50 @@ impl TaskStore {
                 }
             }
 
+            TransportEvent::TerminalRuntimeOutput {
+                runtime_id,
+                terminal_id,
+                data,
+            } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
+                    if !task.terminal_ids.iter().any(|id| id == terminal_id) {
+                        task.terminal_ids.push(terminal_id.clone());
+                    }
+                    task.terminal_output
+                        .entry(terminal_id.clone())
+                        .or_default()
+                        .extend_from_slice(data);
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
             TransportEvent::TerminalExit {
                 task_id,
                 terminal_id,
                 code,
             } => {
                 if let Some(task) = self.tasks.get_mut(&TaskId(task_id.clone())) {
+                    task.terminal_exit.insert(terminal_id.clone(), *code);
+                    task.updated_at = chrono::Utc::now();
+                    cx.notify();
+                }
+            }
+
+            TransportEvent::TerminalRuntimeExit {
+                runtime_id,
+                terminal_id,
+                code,
+            } => {
+                if let Some(task) = self
+                    .tasks
+                    .values_mut()
+                    .find(|task| task.runtime_id.as_deref() == Some(runtime_id.as_str()))
+                {
                     task.terminal_exit.insert(terminal_id.clone(), *code);
                     task.updated_at = chrono::Utc::now();
                     cx.notify();

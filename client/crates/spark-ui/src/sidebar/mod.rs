@@ -104,11 +104,20 @@ impl Sidebar {
         let bots = self.bots.read(cx);
         let mut list = div().flex().flex_col().gap_1();
         for bot in &bots.bots {
+            let bot_id = bot.id.clone();
+            let bot_store = self.bots.clone();
+            let selected = bots.selected.as_ref() == Some(&bot.id);
             list = list.child(
                 div()
                     .px_2()
                     .py_1()
                     .rounded_md()
+                    .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                    .cursor_pointer()
+                    .id(format!("bot-row-{}", bot.id.0))
+                    .on_click(move |_, _, cx| {
+                        bot_store.update(cx, |bots, cx| bots.select(Some(bot_id.clone()), cx));
+                    })
                     .text_sm()
                     .child(SharedString::from(format!("● {}", bot.name))),
             );
@@ -161,11 +170,22 @@ impl Sidebar {
         for workbench in &workbenches.workbenches {
             // A workbench keeps its machine for its whole life: the runtime,
             // PTYs and browser of a project all live on the same machine.
+            let workbench_id = workbench.id.clone();
+            let workbench_store = self.workbenches.clone();
+            let selected = workbenches.selected.as_ref() == Some(&workbench.id);
             list = list.child(
                 div()
                     .px_2()
                     .py_1()
                     .rounded_md()
+                    .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                    .cursor_pointer()
+                    .id(format!("workbench-row-{}", workbench.id))
+                    .on_click(move |_, _, cx| {
+                        workbench_store.update(cx, |workbenches, cx| {
+                            workbenches.select(Some(workbench_id.clone()), cx)
+                        });
+                    })
                     .text_sm()
                     .child(SharedString::from(format!(
                         "{}  ({})",

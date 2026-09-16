@@ -156,13 +156,31 @@ pub enum TransportEvent {
     },
 
     // ----- Terminal -----
+    TerminalOpened {
+        runtime_id: String,
+        terminal_id: String,
+    },
+    TerminalClosed {
+        runtime_id: String,
+        terminal_id: String,
+    },
     TerminalOutput {
         task_id: String,
         terminal_id: String,
         data: Vec<u8>,
     },
+    TerminalRuntimeOutput {
+        runtime_id: String,
+        terminal_id: String,
+        data: Vec<u8>,
+    },
     TerminalExit {
         task_id: String,
+        terminal_id: String,
+        code: Option<i32>,
+    },
+    TerminalRuntimeExit {
+        runtime_id: String,
         terminal_id: String,
         code: Option<i32>,
     },
