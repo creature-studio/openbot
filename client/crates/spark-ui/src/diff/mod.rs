@@ -45,7 +45,11 @@ impl DiffPanel {
                 .child("No file changes");
         }
 
-        let mut content = div().flex().flex_col().h_full();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .bg(gpui::rgb(0x0b1220));
 
         // Header
         content = content.child(
@@ -76,8 +80,8 @@ impl DiffPanel {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .py_2()
                     .rounded_md()
                     .when(selected, |d| d.bg(gpui::rgb(0x1e293b)))
                     .cursor_pointer()
@@ -87,7 +91,7 @@ impl DiffPanel {
                             tasks.select_file(&task_id, change_path.clone(), cx);
                         });
                     })
-                    .hover(|d| d.bg(gpui::rgb(0x1e293b)))
+                    .hover(|d| d.bg(gpui::rgb(0x172554)))
                     .child(
                         div()
                             .flex()

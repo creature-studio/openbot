@@ -91,19 +91,23 @@ impl Render for TaskTimeline {
 
         // Goal header
         let header = div()
-            .px_4()
-            .py_3()
+            .px_5()
+            .py_4()
             .text_lg()
             .font_weight(gpui::FontWeight::BOLD)
+            .text_color(gpui::rgb(0xf8fafc))
+            .border_b_1()
+            .border_color(gpui::rgb(0x1e293b))
             .child(task.goal.clone());
 
         // Status indicator
         let status = div()
-            .px_4()
-            .py_1()
+            .px_5()
+            .py_2()
             .flex()
             .items_center()
             .gap_2()
+            .bg(gpui::rgb(0x0f172a))
             .child(task_status_badge(&task.status));
 
         // Timeline items (in production, use uniform_list for virtualization)
@@ -117,6 +121,7 @@ impl Render for TaskTimeline {
             .flex()
             .flex_col()
             .h_full()
+            .bg(gpui::rgb(0x0b1220))
             .id("task-timeline-scroll")
             .overflow_y_scroll()
             .child(header)
@@ -146,11 +151,16 @@ impl TaskTimeline {
 
     fn render_user_message(&self, msg: &UserMessage) -> impl IntoElement {
         div()
+            .mx_1()
+            .my_1()
+            .px_3()
             .py_2()
+            .rounded_md()
+            .bg(gpui::rgb(0x111c32))
             .child(
                 div()
                     .text_xs()
-                    .text_color(gpui::rgb(0x9ca3af))
+                    .text_color(gpui::rgb(0x60a5fa))
                     .mb_1()
                     .child("用户："),
             )
@@ -162,27 +172,39 @@ impl TaskTimeline {
     }
 
     fn render_assistant_message(&self, msg: &AssistantMessage) -> impl IntoElement {
-        div().py_2().child(
-            div()
-                .text_sm()
-                .when(msg.streaming, |d| {
-                    d.child(
-                        div()
-                            .w(px(2.0))
-                            .h(px(14.0))
-                            .bg(gpui::rgb(0x3b82f6)),
-                    )
-                })
-                .child(msg.content.clone()),
-        )
+        div()
+            .mx_1()
+            .my_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .text_color(gpui::rgb(0xdbeafe))
+            .child(
+                div()
+                    .text_sm()
+                    .when(msg.streaming, |d| {
+                        d.child(
+                            div()
+                                .w(px(2.0))
+                                .h(px(14.0))
+                                .bg(gpui::rgb(0x3b82f6)),
+                        )
+                    })
+                    .child(msg.content.clone()),
+            )
     }
 
     fn render_status(&self, status: &StatusItem) -> impl IntoElement {
         div()
+            .mx_1()
+            .my_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(gpui::rgb(0x0f172a))
             .flex()
             .items_center()
             .gap_2()
-            .py_1()
             .child(
                 div()
                     .text_xs()
@@ -238,9 +260,9 @@ impl TaskTimeline {
                 d.border_color(gpui::rgb(0xef4444)).bg(gpui::rgba(0x5f1e1e20))
             })
             .when(!is_running && !is_error, |d| {
-                d.border_color(gpui::rgb(0x2d3748))
+                d.border_color(gpui::rgb(0x24324a)).bg(gpui::rgb(0x111c32))
             })
-            .p_2();
+            .p_3();
 
         // Header row (always visible)
         let tool_id = tool.id.clone();
@@ -256,6 +278,7 @@ impl TaskTimeline {
                     cx.notify();
                 });
             })
+            .hover(|d| d.bg(gpui::rgba(0x1e3a5f30)))
             .child(
                 div()
                     .flex()
@@ -378,7 +401,8 @@ impl TaskTimeline {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(gpui::rgb(0x1e293b))
+                                .bg(gpui::rgb(0x334155))
+                                .hover(|d| d.bg(gpui::rgb(0x475569)))
                                 .cursor_pointer()
                                 .text_sm()
                                 .id(format!("timeline-permission-deny-{}", perm.id))
@@ -395,7 +419,8 @@ impl TaskTimeline {
                                 .px_3()
                                 .py_1()
                                 .rounded_md()
-                                .bg(gpui::rgb(0x059669))
+                                .bg(gpui::rgb(0x047857))
+                                .hover(|d| d.bg(gpui::rgb(0x059669)))
                                 .cursor_pointer()
                                 .text_sm()
                                 .id(format!("timeline-permission-allow-{}", perm.id))
@@ -445,7 +470,8 @@ impl TaskTimeline {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(gpui::rgb(0x1e293b))
+                            .bg(gpui::rgb(0x334155))
+                            .hover(|d| d.bg(gpui::rgb(0x475569)))
                             .cursor_pointer()
                             .text_sm()
                             .id(format!("timeline-ready-continue-{}", rfc.id))
@@ -462,7 +488,8 @@ impl TaskTimeline {
                             .px_3()
                             .py_1()
                             .rounded_md()
-                            .bg(gpui::rgb(0x059669))
+                            .bg(gpui::rgb(0x047857))
+                            .hover(|d| d.bg(gpui::rgb(0x059669)))
                             .cursor_pointer()
                             .text_sm()
                             .id(format!("timeline-ready-confirm-{}", rfc.id))

@@ -72,7 +72,7 @@ impl AppState {
         let workbenches = cx.new(|_cx| WorkbenchStore::new());
         let attention = cx.new(|_cx| AttentionStore::new());
         let settings = cx.new(|_cx| SettingsStore::new());
-        let machines = cx.new(|_cx| MachineStore::new());
+        let machines = cx.new(|cx| MachineStore::with_focus(cx));
 
         cx.new(move |_cx| Self {
             connection,
@@ -396,26 +396,100 @@ impl Render for RootView {
 
         // Clone what the element needs: a GPUI read guard cannot outlive the
         // statement that produced the returned element.
-        let (form_open, form, machines_entity, command_tx) = {
+        let (form_open, form, machines_entity, command_tx, connection_status) = {
             let state = self.state.read(cx);
             let machines_entity = state.machines.clone();
             let command_tx = state.transport.command_sender();
             let machines = machines_entity.read(cx);
-            (machines.form.open, machines.form.clone(), machines_entity, command_tx)
+            let connection_status = state.connection.read(cx).status.clone();
+            (
+                machines.form.open,
+                machines.form.clone(),
+                machines_entity,
+                command_tx,
+                connection_status,
+            )
+        };
+
+        let (connection_label, connection_color) = match connection_status {
+            ConnectionStatus::Connected => ("Connected", gpui::rgb(0x34d399)),
+            ConnectionStatus::Connecting => ("Connecting", gpui::rgb(0x60a5fa)),
+            ConnectionStatus::Reconnecting { .. } => ("Reconnecting", gpui::rgb(0xfbbf24)),
+            ConnectionStatus::Error { .. } => ("Connection error", gpui::rgb(0xf87171)),
+            ConnectionStatus::Disconnected => ("Offline", gpui::rgb(0x94a3b8)),
         };
 
         div()
             .flex()
             .flex_col()
             .size_full()
-            .bg(gpui::rgb(0x0f172a))
+            .bg(gpui::rgb(0x0b1220))
+            .text_color(gpui::rgb(0xe2e8f0))
+            .child(
+                div()
+                    .h(px(50.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_4()
+                    .bg(gpui::rgb(0x0f172a))
+                    .border_b_1()
+                    .border_color(gpui::rgb(0x1e293b))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w(px(28.0))
+                                    .h(px(28.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_lg()
+                                    .bg(gpui::rgb(0x2563eb))
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child("S"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(div().text_sm().font_weight(gpui::FontWeight::BOLD).child("SPARK"))
+                                    .child(div().text_xs().text_color(gpui::rgb(0x64748b)).child("Agent workspace")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .bg(gpui::rgb(0x111c32))
+                            .border_1()
+                            .border_color(gpui::rgb(0x24324a))
+                            .child(div().text_xs().text_color(connection_color).child("●"))
+                            .child(div().text_xs().text_color(gpui::rgb(0x94a3b8)).child(connection_label)),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.sidebar.clone())
-                    .child(div().flex().flex_1().min_w_0().child(self.timeline.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .bg(gpui::rgb(0x0b1220))
+                            .child(self.timeline.clone()),
+                    )
                     .child(self.inspector.clone()),
             )
             .child(self.composer.clone())

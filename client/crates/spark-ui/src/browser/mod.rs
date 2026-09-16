@@ -94,6 +94,8 @@ impl BrowserPanel {
             .flex()
             .flex_col()
             .h_full()
+            .gap_2()
+            .bg(gpui::rgb(0x0b1220))
             // URL bar
             .child(
                 div()
@@ -102,7 +104,9 @@ impl BrowserPanel {
                     .justify_between()
                     .px_2()
                     .py_1()
-                    .bg(gpui::rgb(0x0f172a))
+                    .bg(gpui::rgb(0x111c32))
+                    .border_1()
+                    .border_color(gpui::rgb(0x24324a))
                     .rounded_md()
                     .mb_2()
                     .child(

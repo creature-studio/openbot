@@ -71,12 +71,12 @@ impl Render for Sidebar {
             .flex()
             .flex_col()
             .h_full()
-            .w(px(220.0))
-            .bg(gpui::rgb(0x111827))
+            .w(px(244.0))
+            .bg(gpui::rgb(0x0f172a))
             .border_r_1()
-            .border_color(gpui::rgb(0x2d3748))
-            .p_2()
-            .gap_4()
+            .border_color(gpui::rgb(0x1e293b))
+            .p_3()
+            .gap_5()
             .child(self.render_bots(cx))
             .child(self.render_tasks(cx))
             .child(self.render_workbenches(cx))
@@ -94,7 +94,8 @@ impl Sidebar {
                 div()
                     .px_2()
                     .text_xs()
-                    .text_color(gpui::rgb(0x6b7280))
+                    .text_color(gpui::rgb(0x64748b))
+                    .font_weight(gpui::FontWeight::BOLD)
                     .child(SharedString::from(title.to_string())),
             )
             .child(body)
@@ -109,10 +110,11 @@ impl Sidebar {
             let selected = bots.selected.as_ref() == Some(&bot.id);
             list = list.child(
                 div()
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .py_2()
                     .rounded_md()
-                    .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                    .when(selected, |d| d.bg(gpui::rgb(0x1e293b)))
+                    .hover(|d| d.bg(gpui::rgb(0x172554)))
                     .cursor_pointer()
                     .id(format!("bot-row-{}", bot.id.0))
                     .on_click(move |_, _, cx| {
@@ -142,13 +144,14 @@ impl Sidebar {
                 let task_store = self.tasks.clone();
                 list = list.child(
                     div()
-                        .px_2()
-                        .py_1()
+                        .px_3()
+                        .py_2()
                         .rounded_md()
                         .text_sm()
                         .cursor_pointer()
                         .id(format!("task-row-{}", task_id.0))
-                        .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                        .when(selected, |d| d.bg(gpui::rgb(0x1e293b)))
+                        .hover(|d| d.bg(gpui::rgb(0x172554)))
                         .on_click(move |_, _, cx| {
                             task_store.update(cx, |tasks, cx| {
                                 tasks.select(Some(task_id.clone()), cx);
@@ -175,10 +178,11 @@ impl Sidebar {
             let selected = workbenches.selected.as_ref() == Some(&workbench.id);
             list = list.child(
                 div()
-                    .px_2()
-                    .py_1()
+                    .px_3()
+                    .py_2()
                     .rounded_md()
-                    .when(selected, |d| d.bg(gpui::rgb(0x1f2937)))
+                    .when(selected, |d| d.bg(gpui::rgb(0x1e293b)))
+                    .hover(|d| d.bg(gpui::rgb(0x172554)))
                     .cursor_pointer()
                     .id(format!("workbench-row-{}", workbench.id))
                     .on_click(move |_, _, cx| {

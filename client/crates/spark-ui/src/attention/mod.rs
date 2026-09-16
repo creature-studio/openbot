@@ -100,15 +100,18 @@ impl AttentionOverlay {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(gpui::rgba(0x020617b3))
             .child(
                 div()
                     .w(px(420.0))
                     .rounded_lg()
-                    .bg(gpui::rgb(0x1e293b))
+                    .bg(gpui::rgb(0x111c32))
                     .border_1()
                     .border_color(gpui::rgb(0xf59e0b))
                     .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
                             .text_lg()
@@ -143,7 +146,8 @@ impl AttentionOverlay {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(gpui::rgb(0x374151))
+                                    .bg(gpui::rgb(0x334155))
+                                    .hover(|d| d.bg(gpui::rgb(0x475569)))
                                     .cursor_pointer()
                                     .text_sm()
                                     .id("permission-deny")
@@ -161,7 +165,8 @@ impl AttentionOverlay {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(gpui::rgb(0x059669))
+                                    .bg(gpui::rgb(0x047857))
+                                    .hover(|d| d.bg(gpui::rgb(0x059669)))
                                     .cursor_pointer()
                                     .text_sm()
                                     .id("permission-approve")
@@ -198,15 +203,18 @@ impl AttentionOverlay {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00000080))
+            .bg(gpui::rgba(0x020617b3))
             .child(
                 div()
                     .w(px(420.0))
                     .rounded_lg()
-                    .bg(gpui::rgb(0x1e293b))
+                    .bg(gpui::rgb(0x111c32))
                     .border_1()
                     .border_color(gpui::rgb(0x10b981))
                     .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
                             .text_lg()
@@ -237,7 +245,8 @@ impl AttentionOverlay {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(gpui::rgb(0x374151))
+                                    .bg(gpui::rgb(0x334155))
+                                    .hover(|d| d.bg(gpui::rgb(0x475569)))
                                     .cursor_pointer()
                                     .text_sm()
                                     .id("ready-continue")
@@ -255,7 +264,8 @@ impl AttentionOverlay {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(gpui::rgb(0x059669))
+                                    .bg(gpui::rgb(0x047857))
+                                    .hover(|d| d.bg(gpui::rgb(0x059669)))
                                     .cursor_pointer()
                                     .text_sm()
                                     .id("ready-confirm")
@@ -327,10 +337,13 @@ impl AttentionOverlay {
                 div()
                     .w(px(420.0))
                     .rounded_lg()
-                    .bg(gpui::rgb(0x1e293b))
+                    .bg(gpui::rgb(0x111c32))
                     .border_1()
                     .border_color(gpui::rgb(0xef4444))
                     .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
                             .text_lg()
@@ -373,10 +386,13 @@ impl AttentionOverlay {
                 div()
                     .w(px(420.0))
                     .rounded_lg()
-                    .bg(gpui::rgb(0x1e293b))
+                    .bg(gpui::rgb(0x111c32))
                     .border_1()
                     .border_color(gpui::rgb(0x3b82f6))
                     .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
                             .text_lg()
@@ -394,7 +410,8 @@ impl AttentionOverlay {
                                     .px_4()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(gpui::rgb(0x3b82f6))
+                                    .bg(gpui::rgb(0x2563eb))
+                                    .hover(|d| d.bg(gpui::rgb(0x3b82f6)))
                                     .cursor_pointer()
                                     .id("waiting-input-continue")
                                     .on_click(move |_, _, cx| {
@@ -422,19 +439,12 @@ impl Render for AttentionOverlay {
             .as_ref()
             .and_then(|machines| machines.read(cx).attention.clone());
         if let Some(attention) = machine_attention {
-            return div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(0x00000080))
-                .child(MachinePanel::render_host_key_attention(
-                    attention,
-                    self.machines.clone().expect("machine entity"),
-                    self.command_tx.clone().expect("machine command channel"),
-                ))
-                .into_any_element();
+            return MachinePanel::render_host_key_attention(
+                attention,
+                self.machines.clone().expect("machine entity"),
+                self.command_tx.clone().expect("machine command channel"),
+            )
+            .into_any_element();
         }
 
         let dismiss_completed = self.attention.clone();
@@ -479,7 +489,7 @@ impl Render for AttentionOverlay {
                     div()
                         .w(px(360.0))
                         .rounded_lg()
-                        .bg(gpui::rgb(0x1e293b))
+                        .bg(gpui::rgb(0x111c32))
                         .border_1()
                         .border_color(gpui::rgb(0x10b981))
                         .p_6()

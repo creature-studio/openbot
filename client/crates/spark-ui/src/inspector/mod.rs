@@ -73,10 +73,10 @@ impl Render for Inspector {
             .flex()
             .flex_col()
             .h_full()
-            .w(px(360.0))
-            .bg(gpui::rgb(0x111827))
+            .w(px(380.0))
+            .bg(gpui::rgb(0x0f172a))
             .border_l_1()
-            .border_color(gpui::rgb(0x2d3748))
+            .border_color(gpui::rgb(0x1e293b))
             .child(self.render_tabs(cx))
             .child(self.render_content(cx))
     }
@@ -87,8 +87,10 @@ impl Inspector {
         let inspector = cx.entity();
         div()
             .flex()
+            .items_center()
+            .px_2()
             .border_b_1()
-            .border_color(gpui::rgb(0x2d3748))
+            .border_color(gpui::rgb(0x1e293b))
             .child(self.tab_button("Browser", InspectorTab::Browser, inspector.clone()))
             .child(self.tab_button("Files", InspectorTab::Files, inspector.clone()))
             .child(self.tab_button("Terminal", InspectorTab::Terminal, inspector.clone()))
@@ -104,8 +106,8 @@ impl Inspector {
         let is_active = self.active_tab == tab;
         div()
             .px_3()
-            .py_2()
-            .text_sm()
+            .py_3()
+            .text_xs()
             .cursor_pointer()
             .id(format!("inspector-tab-{}", label.to_lowercase()))
             .on_click(move |_, _, cx| {

@@ -74,13 +74,18 @@ impl TerminalPanel {
             return empty;
         }
 
-        let mut content = div().flex().flex_col().h_full();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .h_full()
+            .bg(gpui::rgb(0x0b1220));
 
         // Tab bar for terminal sessions
         let mut tabs = div()
             .flex()
             .border_b_1()
-            .border_color(gpui::rgb(0x2d3748));
+            .border_color(gpui::rgb(0x1e293b))
+            .bg(gpui::rgb(0x0f172a));
 
         for (i, term_id) in task.terminal_ids.iter().enumerate() {
             let close_tx = command_tx.clone();

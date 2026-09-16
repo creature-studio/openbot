@@ -26,7 +26,7 @@
 //! These are `render_static` helpers (same convention as `BrowserPanel`): the
 //! sidebar and the inspector own the entities, the drawing lives here.
 
-use gpui::{div, px, prelude::*, Entity, IntoElement, SharedString};
+use gpui::{div, px, prelude::*, Entity, FocusHandle, IntoElement, SharedString};
 use spark_model::{Machine, MachineId, MachineKind, MachineStatus};
 
 use crate::stores::machine::{
@@ -59,13 +59,16 @@ impl MachinePanel {
         let add_store = store.clone();
         list.child(
             div()
-                .mt_1()
-                .px_2()
-                .py_1()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(gpui::rgb(0x24324a))
                 .text_xs()
-                .text_color(gpui::rgb(0x9ca3af))
+                .text_color(gpui::rgb(0x60a5fa))
                 .cursor_pointer()
-                .hover(|d| d.text_color(gpui::rgb(0xffffff)))
+                .hover(|d| d.bg(gpui::rgb(0x172554)))
                 .id("add-machine")
                 .on_click(move |_, _, cx| {
                     add_store.update(cx, |store, cx| store.open_form(cx));
@@ -81,10 +84,11 @@ impl MachinePanel {
             .flex()
             .items_center()
             .gap_2()
-            .px_2()
-            .py_1()
+            .px_3()
+            .py_2()
             .rounded_md()
-            .when(is_selected, |d| d.bg(gpui::rgb(0x1f2937)))
+            .when(is_selected, |d| d.bg(gpui::rgb(0x1e293b)))
+            .hover(|d| d.bg(gpui::rgb(0x172554)))
             .id(format!("machine-row-{}", machine_id.as_str()))
             .on_click(move |_, _, cx| {
                 let id = machine_id.clone();
@@ -112,7 +116,7 @@ impl MachinePanel {
             .child(
                 div()
                     .text_xs()
-                    .text_color(gpui::rgb(0x6b7280))
+                    .text_color(gpui::rgb(status_color(&status)))
                     .child(SharedString::from(if status.is_connected() {
                         latency_label(&machine)
                     } else {
@@ -215,13 +219,22 @@ impl MachinePanel {
             ),
         ];
 
-        let mut body = div().flex().flex_col().gap_2().p_3();
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .h_full()
+            .p_3()
+            .bg(gpui::rgb(0x0b1220));
         for (label, value) in rows {
             body = body.child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .p_2()
+                    .rounded_md()
+                    .bg(gpui::rgb(0x111c32))
                     .child(
                         div()
                             .w(px(88.0))
@@ -295,9 +308,9 @@ impl MachinePanel {
         let mut body = div()
             .w(px(420.0))
             .rounded_lg()
-            .bg(gpui::rgb(0x1e293b))
+            .bg(gpui::rgb(0x111c32))
             .border_1()
-            .border_color(gpui::rgb(0x374151))
+            .border_color(gpui::rgb(0x24324a))
             .p_6()
             .flex()
             .flex_col()
@@ -316,6 +329,8 @@ impl MachinePanel {
             "devbox",
             store.clone(),
             MachineFormField::Name,
+            form.focus_handles.get(&MachineFormField::Name).cloned(),
+            form.active_field == Some(MachineFormField::Name),
         ));
         body = body.child(field(
             "host / ip",
@@ -323,6 +338,8 @@ impl MachinePanel {
             "10.0.0.42",
             store.clone(),
             MachineFormField::Host,
+            form.focus_handles.get(&MachineFormField::Host).cloned(),
+            form.active_field == Some(MachineFormField::Host),
         ));
         body = body.child(
             div()
@@ -334,6 +351,8 @@ impl MachinePanel {
                     "ubuntu",
                     store.clone(),
                     MachineFormField::User,
+                    form.focus_handles.get(&MachineFormField::User).cloned(),
+                    form.active_field == Some(MachineFormField::User),
                 )))
                 .child(div().w(px(90.0)).child(field(
                     "port",
@@ -341,6 +360,8 @@ impl MachinePanel {
                     "22",
                     store.clone(),
                     MachineFormField::Port,
+                    form.focus_handles.get(&MachineFormField::Port).cloned(),
+                    form.active_field == Some(MachineFormField::Port),
                 ))),
         );
         let toggle_store = store.clone();
@@ -366,6 +387,10 @@ impl MachinePanel {
                 "devbox",
                 store.clone(),
                 MachineFormField::SshConfigHost,
+                form.focus_handles
+                    .get(&MachineFormField::SshConfigHost)
+                    .cloned(),
+                form.active_field == Some(MachineFormField::SshConfigHost),
             ));
         }
 
@@ -549,9 +574,63 @@ fn field(
     placeholder: &str,
     store: Entity<MachineStore>,
     field: MachineFormField,
+    focus_handle: Option<FocusHandle>,
+    active: bool,
 ) -> impl IntoElement {
-    let field_store = store;
+    let field_store = store.clone();
+    let click_store = store;
     let field_id = format!("machine-form-field-{}", label.replace(' ', "-"));
+    let click_focus = focus_handle.clone();
+    let input = div()
+        .id(field_id)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            click_store.update(cx, |store, cx| {
+                let cursor = store.form.field_len(field);
+                store.form.active_field = Some(field);
+                store.form.cursor = cursor;
+                cx.notify();
+            });
+            if let Some(handle) = click_focus.as_ref() {
+                window.focus(handle);
+            }
+        })
+        .on_key_down(move |event, _, cx| {
+            let key = event.keystroke.key.clone();
+            let key_char = event.keystroke.key_char.as_deref().map(str::to_string);
+            field_store.update(cx, |store, cx| {
+                store.edit_form_field(field, &key, key_char.as_deref(), cx);
+            });
+        })
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(if active {
+            gpui::rgb(0x3b82f6)
+        } else {
+            gpui::rgb(0x24324a)
+        })
+        .bg(gpui::rgb(0x0f172a))
+        .hover(|d| d.border_color(gpui::rgb(0x3b82f6)))
+        .text_sm()
+        .text_color(if value.is_empty() {
+            gpui::rgb(0x64748b)
+        } else {
+            gpui::rgb(0xe5e7eb)
+        })
+        .child(SharedString::from(if value.is_empty() {
+            placeholder.to_string()
+        } else {
+            value.to_string()
+        }));
+
+    let input = if let Some(handle) = focus_handle {
+        input.track_focus(&handle).into_any_element()
+    } else {
+        input.into_any_element()
+    };
+
     div()
         .flex()
         .flex_col()
@@ -559,32 +638,10 @@ fn field(
         .child(
             div()
                 .text_xs()
-                .text_color(gpui::rgb(0x6b7280))
+                .text_color(gpui::rgb(0x94a3b8))
                 .child(SharedString::from(label.to_string())),
         )
-        .child(
-            div()
-                .id(field_id)
-                .cursor_pointer()
-                .on_key_down(move |event, _, cx| {
-                    let key = event.keystroke.key.clone();
-                    let key_char = event.keystroke.key_char.as_deref().map(str::to_string);
-                    field_store.update(cx, |store, cx| {
-                        store.edit_form_field(field, &key, key_char.as_deref(), cx);
-                    });
-                })
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(gpui::rgb(0x0f172a))
-                .text_sm()
-                .text_color(gpui::rgb(0xe5e7eb))
-                .child(SharedString::from(if value.is_empty() {
-                    placeholder.to_string()
-                } else {
-                    value.to_string()
-                })),
-        )
+        .child(input)
 }
 
 fn button(label: &str, background: u32) -> gpui::Div {
@@ -593,6 +650,7 @@ fn button(label: &str, background: u32) -> gpui::Div {
         .py_2()
         .rounded_md()
         .bg(gpui::rgb(background))
+        .hover(|d| d.bg(gpui::rgb(background.saturating_add(0x101010))))
         .cursor_pointer()
         .text_sm()
         .child(SharedString::from(label.to_string()))

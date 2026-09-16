@@ -5,8 +5,9 @@
 //! and folds the resulting [`TransportEvent`]s back into state — which is why
 //! the GPUI client can show a remote machine without knowing what SSH is.
 
-use gpui::{Context, EventEmitter};
+use gpui::{Context, EventEmitter, FocusHandle};
 use spark_model::*;
+use std::collections::HashMap;
 use spark_transport::{BootstrapSummary, MachineTestOutcome, TransportCommand, TransportEvent};
 
 // ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ pub struct MachineAttention {
 }
 
 /// The "+ Machine" form the user is filling in.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MachineForm {
     /// Display name ("devbox").
     pub name: String,
@@ -61,11 +62,14 @@ pub struct MachineForm {
     /// credential or introducing a remote-specific input model.
     pub active_field: Option<MachineFormField>,
     pub cursor: usize,
+    /// Focus handles are owned by the store entity so each visible field can
+    /// participate in GPUI's focus tree without inventing a second form model.
+    pub focus_handles: HashMap<MachineFormField, FocusHandle>,
 }
 
 /// A field in the add-machine form. The form uses GPUI's keyboard events so
 /// it remains editable without giving the UI any SSH-specific input widget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MachineFormField {
     Name,
     Host,
@@ -92,7 +96,19 @@ impl MachineForm {
     }
 
     pub fn close(&mut self) {
+        let focus_handles = std::mem::take(&mut self.focus_handles);
         *self = Self::default();
+        self.focus_handles = focus_handles;
+    }
+
+    pub fn field_len(&self, field: MachineFormField) -> usize {
+        match field {
+            MachineFormField::Name => self.name.chars().count(),
+            MachineFormField::Host => self.host.chars().count(),
+            MachineFormField::User => self.user.chars().count(),
+            MachineFormField::Port => self.port.chars().count(),
+            MachineFormField::SshConfigHost => self.ssh_config_host.chars().count(),
+        }
     }
 
     /// Turn the fields into the draft host-agent stores (coordinates only —
@@ -181,6 +197,22 @@ impl MachineStore {
         }
     }
 
+    /// Construct the store inside a GPUI entity and allocate one focus handle
+    /// per editable field. `new` remains available for model-only tests.
+    pub fn with_focus(cx: &mut Context<Self>) -> Self {
+        let mut store = Self::new();
+        for field in [
+            MachineFormField::Name,
+            MachineFormField::Host,
+            MachineFormField::User,
+            MachineFormField::Port,
+            MachineFormField::SshConfigHost,
+        ] {
+            store.form.focus_handles.insert(field, cx.focus_handle());
+        }
+        store
+    }
+
     // ----- selection / lookup -----
 
     pub fn select(&mut self, id: Option<MachineId>, cx: &mut Context<Self>) {
@@ -223,7 +255,9 @@ impl MachineStore {
 
     /// Open the "+ Machine" form.
     pub fn open_form(&mut self, cx: &mut Context<Self>) {
+        let focus_handles = std::mem::take(&mut self.form.focus_handles);
         self.form = MachineForm::open();
+        self.form.focus_handles = focus_handles;
         self.form.use_ssh_config = false;
         cx.notify();
     }
