@@ -74,11 +74,33 @@ pub fn run_app() {
         }
 
         let state_for_window = state.clone();
-        let options = gpui::WindowOptions::default();
-        if let Err(e) = cx.open_window(options, move |_window, cx| {
+        let window_bounds = Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
+            gpui::point(gpui::px(100.0), gpui::px(100.0)),
+            gpui::size(gpui::px(1280.0), gpui::px(800.0)),
+        )));
+        let options = gpui::WindowOptions {
+            window_bounds,
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("Spark".into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }),
+            app_id: Some("spark".into()),
+            focus: true,
+            show: true,
+            window_decorations: Some(gpui::WindowDecorations::Server),
+            window_background: gpui::WindowBackgroundAppearance::Opaque,
+            ..Default::default()
+        };
+        match cx.open_window(options, move |_window, cx| {
             cx.new(|cx| RootView::new(state_for_window.clone(), cx))
         }) {
-            tracing::error!("could not open the Spark window: {e:#}");
+            Ok(_) => {
+                cx.activate(true);
+            }
+            Err(e) => {
+                tracing::error!("could not open the Spark window: {e:#}");
+            }
         }
     });
 }

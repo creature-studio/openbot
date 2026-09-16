@@ -1,0 +1,10 @@
+[env]
+RUST_FONTCONFIG_DLOPEN = "1"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "link-arg=-L/home/fxh/mycode/openbot/client/.cargo/lib",
+    "-C", "link-arg=-Wl,--disable-new-dtags",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../.cargo/lib",
+    "-C", "link-arg=-Wl,-rpath,/home/fxh/mycode/openbot/client/.cargo/lib"
+]

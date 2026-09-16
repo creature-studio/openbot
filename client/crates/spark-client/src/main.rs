@@ -62,7 +62,58 @@ fn host_agent_socket() -> PathBuf {
         .join("host-agent.sock")
 }
 
+/// Ensure display environment variables are valid before GPUI initializes.
+///
+/// On Linux/WSL2, `WAYLAND_DISPLAY` is often set by the environment while
+/// `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY` does not actually exist, causing
+/// GPUI's `WaylandClient::new()` to panic with `NoCompositor`. In that case,
+/// falling back to X11 (or fixing `XDG_RUNTIME_DIR`) prevents the crash.
+fn sanitize_display_env() {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(wayland_display) = std::env::var("WAYLAND_DISPLAY") {
+            if !wayland_display.is_empty() {
+                let socket_exists = if wayland_display.starts_with('/') {
+                    std::path::Path::new(&wayland_display).exists()
+                } else if let Ok(xdg_runtime) = std::env::var("XDG_RUNTIME_DIR") {
+                    std::path::Path::new(&xdg_runtime).join(&wayland_display).exists()
+                } else {
+                    false
+                };
+
+                if !socket_exists {
+                    // Wayland socket does not exist at standard XDG_RUNTIME_DIR.
+                    // If DISPLAY is set (e.g. WSLg X11 server :0), unset WAYLAND_DISPLAY
+                    // so GPUI smoothly falls back to X11 instead of panicking.
+                    if std::env::var("DISPLAY").map_or(false, |d| !d.is_empty()) {
+                        unsafe {
+                            std::env::remove_var("WAYLAND_DISPLAY");
+                        }
+                    } else if std::path::Path::new("/mnt/wslg/runtime-dir").join(&wayland_display).exists() {
+                        unsafe {
+                            std::env::set_var("XDG_RUNTIME_DIR", "/mnt/wslg/runtime-dir");
+                        }
+                    }
+                }
+            }
+        }
+
+        // On WSL2 or headless systems without native DRM devices (/dev/dri), Mesa's
+        // EGL loader attempts to probe hardware DRI and Zink (OpenGL-over-Vulkan)
+        // which fail with fd -1 and "ZINK: failed to choose pdev" before falling back
+        // to software rendering. Setting LIBGL_ALWAYS_SOFTWARE=1 silences those errors
+        // and avoids failed probe cycles unless explicitly overridden.
+        if !std::path::Path::new("/dev/dri").exists() && std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none() {
+            unsafe {
+                std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    sanitize_display_env();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
